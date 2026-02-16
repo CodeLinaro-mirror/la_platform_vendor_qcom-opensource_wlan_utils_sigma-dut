@@ -1167,7 +1167,7 @@ static int set_p2p_twt_params(struct sigma_dut *dut, struct sigma_conn *conn,
 		/* SP = val * 256 us */
 		dut->twt_param.nominal_min_wake_dur = 78;
 		dut->twt_param.bcast_twt_id = 0;
-		dut->twt_param.bcast_twt_persis = 0;
+		dut->twt_param.bcast_twt_persis = 255;
 		dut->twt_param.bcast_twt_recommdn = 0;
 		dut->twt_param.responder_pm = 1;
 	}
@@ -1253,6 +1253,8 @@ cmd_sta_start_autonomous_go(struct sigma_dut *dut, struct sigma_conn *conn,
 		const char *type = get_param(cmd, "type");
 		int p2p_mode = 0;
 
+		if (type && strcasecmp(type, "PASN") == 0)
+			p2p_mode = 1;
 		if (type && strcasecmp(type, "PCC") == 0)
 			p2p_mode = 2;
 

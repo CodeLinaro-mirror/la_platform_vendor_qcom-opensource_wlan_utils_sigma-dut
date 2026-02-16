@@ -780,6 +780,8 @@ struct sigma_dut {
 		AP_WPA2_PSK_SHA256,
 		AP_WPA2_ENT_FT_EAP,
 		AP_OSEN,
+		AP_PASN,
+		AP_PASN_SAE,
 		AP_WPA3_SAE_EXT,
 	} ap_key_mgmt;
 	enum ap_tag_key_mgmt {
@@ -797,6 +799,10 @@ struct sigma_dut {
 		AP_PMF_OPTIONAL,
 		AP_PMF_REQUIRED
 	} ap_pmf;
+	enum ap_pasn {
+		PASN_DISABLED,
+		PASN_ENABLED,
+	} ap_pasn;
 	enum ap_cipher {
 		AP_NO_GROUP_CIPHER_SET,
 		AP_CCMP,
@@ -1296,6 +1302,9 @@ struct sigma_dut {
 	int i2rlmr_iftmr;
 	int i2rlmrpolicy;
 	int rnm_mfp;
+	int urnm_mfpr_x20;
+	int secure_ltf_supported;
+	int ap_pasn_unauth;
 	struct device_pairing_info dev_info;
 	struct peer_pairing_info peer_info;
 #ifdef ANDROID_MDNS
@@ -1306,6 +1315,7 @@ struct sigma_dut {
 #endif /* ANDROID_MDNS */
 	char host_name[100];
 	int sta_roaming_disabled;
+	int ciphers_capa; /* bitmap of enum sigma_cipher_suites values */
 	int key_mgmt_capa; /* bitmap of enum sigma_akm_suites values */
 	int pairwise_ciphers_capa; /* bitmap of enum sigma_cipher_suites values
 				    */
@@ -1436,6 +1446,8 @@ int ap_wps_registration(struct sigma_dut *dut, struct sigma_conn *conn,
 const char * get_hostapd_ifname(struct sigma_dut *dut);
 void get_wiphy_capabilities(struct sigma_dut *dut);
 void kill_hostapd_process_pid(struct sigma_dut *dut);
+int fwtest_cmd_wrapper(struct sigma_dut *dut, const char *arg,
+		       const char *ifname);
 
 /* sta.c */
 void sta_register_cmds(void);

@@ -1293,7 +1293,16 @@ void kill_dhcp_client(struct sigma_dut *dut, const char *ifname)
 		unlink(path);
 		sleep(1);
 	} else {
-		snprintf(path, sizeof(path), "/var/run/dhcpcd-%s.pid", ifname);
+		if (access("/var/run/dhcpcd", F_OK) == 0) {
+			snprintf(path, sizeof(path), "/var/run/dhcpcd/%s.pid",
+				 ifname);
+			if (access(path, F_OK) < 0)
+				snprintf(path, sizeof(path),
+					 "/var/run/dhcpcd/pid");
+		} else {
+			snprintf(path, sizeof(path), "/var/run/dhcpcd-%s.pid",
+				 ifname);
+		}
 
 		if (stat(path, &s) == 0) {
 			snprintf(buf, sizeof(buf), "kill `cat %s`", path);
@@ -6908,6 +6917,14 @@ static int mbo_set_cellular_data_capa(struct sigma_dut *dut,
 static int mbo_set_roaming(struct sigma_dut *dut, struct sigma_conn *conn,
 			   const char *intf, const char *val)
 {
+	/* mac80211 drivers rely on wpa_supplicant to manage roaming behavior.
+	 * Roaming is controlled via wpa_supplicant configuration. No additional
+	 * handling is required in sigma_dut. Therefore, simply return success
+	 * without issuing SET roaming commands.
+	 */
+	if (get_driver_type(dut) == DRIVER_MAC80211)
+		return 1;
+
 	if (strcasecmp(val, "Disable") == 0) {
 		if (wpa_command(intf, "SET roaming 0") < 0) {
 			send_resp(dut, conn, SIGMA_ERROR,
@@ -8652,6 +8669,27 @@ cmd_sta_set_wireless_common(const char *intf, struct sigma_dut *dut,
 			novap_reset(dut, intf, 1);
 			ath_config_dyn_bw_sig(dut, intf, val);
 			break;
+		case DRIVER_MAC80211:
+			if (strcasecmp(val, "enable") == 0) {
+				res = fwtest_cmd_wrapper(dut,
+							 "-t 2 -m 0x0 -p 1 0xa 1",
+							 intf);
+				if (res) {
+					sigma_dut_print(dut, DUT_MSG_ERROR,
+							"Failed to enable dynamic BW signalling");
+					return ERROR_SEND_STATUS;
+				}
+			} else if (strcasecmp(val, "disable") == 0) {
+				res = fwtest_cmd_wrapper(dut,
+							 "-t 2 -m 0x0 -p 1 0xa 0",
+							 intf);
+				if (res) {
+					sigma_dut_print(dut, DUT_MSG_ERROR,
+							"Failed to disable dynamic BW signalling");
+					return ERROR_SEND_STATUS;
+				}
+			}
+			break;
 		default:
 			sigma_dut_print(dut, DUT_MSG_ERROR,
 					"Failed to set DYN_BW_SGNL");
@@ -8732,6 +8770,16 @@ cmd_sta_set_wireless_common(const char *intf, struct sigma_dut *dut,
 							set_val);
 					return ERROR_SEND_STATUS;
 				}
+			}
+		} else if (get_driver_type(dut) == DRIVER_MAC80211) {
+			if (set_val) {
+				fwtest_cmd_wrapper(dut,
+						   "-t 2 -m 0x0 -p 1 0xa 1",
+						   intf);
+			} else {
+				fwtest_cmd_wrapper(dut,
+						   "-t 2 -m 0x0 -p 1 0xa 0",
+						   intf);
 			}
 		} else {
 			run_iwpriv(dut, intf, "cwmenable %d", set_val);
@@ -12908,6 +12956,18 @@ static int sta_transmit_omi(struct sigma_dut *dut, struct sigma_conn *conn,
 }
 
 
+static int
+mac80211_sta_set_addba_buf_size(struct sigma_dut *dut, const char *intf,
+				int buf_size)
+{
+	char buf[64];
+
+	snprintf(buf, sizeof(buf), "-t 1 -m 0 -v 0 0x7e %d",
+		 buf_size == 256 ? 3 : 2);
+	return fwtest_cmd_wrapper(dut, buf, intf);
+}
+
+
 static enum sigma_cmd_result
 cmd_sta_set_wireless_vht(struct sigma_dut *dut, struct sigma_conn *conn,
 			 struct sigma_cmd *cmd)
@@ -13597,9 +13657,27 @@ cmd_sta_set_wireless_vht(struct sigma_dut *dut, struct sigma_conn *conn,
 		else if (strcasecmp(val, "Disable") == 0)
 			set_val = 0;
 
-		if (sta_set_om_ctrl_supp(dut, intf, set_val)) {
+		switch (get_driver_type(dut)) {
+		case DRIVER_WCN:
+			if (sta_set_om_ctrl_supp(dut, intf, set_val)) {
+				send_resp(dut, conn, SIGMA_ERROR,
+					  "ErrorCode,Failed to set OM ctrl supp");
+				return STATUS_SENT_ERROR;
+			}
+			break;
+		case DRIVER_MAC80211:
+			/* For mac80211 drivers, there is no provision to
+			 * control HE OMI, OMControl is enabled by default.
+			 */
+			if (set_val == 0) {
+				send_resp(dut, conn, SIGMA_ERROR,
+					  "ErrorCode,Failed to disable OM ctrl supp");
+				return STATUS_SENT_ERROR;
+			}
+			break;
+		default:
 			send_resp(dut, conn, SIGMA_ERROR,
-				  "ErrorCode,Failed to set OM ctrl supp");
+				  "ErrorCode,Setting OM ctrl not supported");
 			return STATUS_SENT_ERROR;
 		}
 	}
@@ -13640,10 +13718,25 @@ cmd_sta_set_wireless_vht(struct sigma_dut *dut, struct sigma_conn *conn,
 			buf_size = 256;
 		else
 			buf_size = 64;
-		if (get_driver_type(dut) == DRIVER_WCN &&
-		    sta_set_addba_buf_size(dut, intf, buf_size)) {
+
+		switch (get_driver_type(dut)) {
+		case DRIVER_WCN:
+			if (sta_set_addba_buf_size(dut, intf, buf_size)) {
+				send_resp(dut, conn, SIGMA_ERROR,
+					  "ErrorCode,set addbaresp_buff_size failed");
+				return STATUS_SENT_ERROR;
+			}
+			break;
+		case DRIVER_MAC80211:
+			if (mac80211_sta_set_addba_buf_size(dut, intf, buf_size)) {
+				send_resp(dut, conn, SIGMA_ERROR,
+					  "ErrorCode,set addbaresp_buff_size failed");
+				return STATUS_SENT_ERROR;
+			}
+			break;
+		default:
 			send_resp(dut, conn, SIGMA_ERROR,
-				  "ErrorCode,set addbaresp_buff_size failed");
+				  "ErrorCode,does not support set addbaresp_buff_size");
 			return STATUS_SENT_ERROR;
 		}
 	}
@@ -13662,10 +13755,25 @@ cmd_sta_set_wireless_vht(struct sigma_dut *dut, struct sigma_conn *conn,
 			buf_size = 256;
 		else
 			buf_size = 64;
-		if (get_driver_type(dut) == DRIVER_WCN &&
-		    sta_set_addba_buf_size(dut, intf, buf_size)) {
+
+		switch (get_driver_type(dut)) {
+		case DRIVER_WCN:
+			if (sta_set_addba_buf_size(dut, intf, buf_size)) {
+				send_resp(dut, conn, SIGMA_ERROR,
+					  "ErrorCode,set addbareq_buff_size failed");
+				return STATUS_SENT_ERROR;
+			}
+			break;
+		case DRIVER_MAC80211:
+			if (mac80211_sta_set_addba_buf_size(dut, intf, buf_size)) {
+				send_resp(dut, conn, SIGMA_ERROR,
+					  "ErrorCode,set addbareq_buff_size failed");
+				return STATUS_SENT_ERROR;
+			}
+			break;
+		default:
 			send_resp(dut, conn, SIGMA_ERROR,
-				  "ErrorCode,set addbareq_buff_size failed");
+				  "ErrorCode,does not support set addbareq_buff_size");
 			return STATUS_SENT_ERROR;
 		}
 	}
@@ -13923,6 +14031,8 @@ sta_set_wireless_loc_r2(struct sigma_dut *dut, struct sigma_conn *conn,
 {
 	const char *i2rlmr_iftmr = get_param(cmd, "I2RLMRIFTMR");
 	const char *session_terminate = get_param(cmd, "FTMSessionTerminate");
+	const char *urnm_mfpr_x20 = get_param(cmd, "URNM_MFPR_X20");
+	const char *intf = get_param(cmd, "Interface");
 
 	if (i2rlmr_iftmr) {
 		dut->i2rlmr_iftmr = atoi(i2rlmr_iftmr);
@@ -13938,6 +14048,19 @@ sta_set_wireless_loc_r2(struct sigma_dut *dut, struct sigma_conn *conn,
 		if (val)
 			dut->i2rlmrpolicy =
 				LOC_ABORT_ON_I2R_LMR_POLICY_MISMATCH;
+	}
+
+	if (urnm_mfpr_x20 && dut->device_type == STA_testbed) {
+		char buf[25];
+
+		dut->urnm_mfpr_x20 = strcasecmp(urnm_mfpr_x20, "Disable") != 0;
+		snprintf(buf, sizeof(buf), "SET urnm_mfpr_x20 %d",
+			 dut->urnm_mfpr_x20);
+		if (wpa_command(intf, buf) < 0) {
+			send_resp(dut, conn, SIGMA_ERROR,
+				  "ErrorCode,Failed to set value urnm_mfpr_x20");
+			return STATUS_SENT_ERROR;
+		}
 	}
 
 	return SUCCESS_SEND_STATUS;
@@ -19113,11 +19236,237 @@ failed:
 }
 
 
+static int
+mac80211_sta_transmit_omi(struct sigma_dut *dut, struct sigma_conn *conn,
+			  struct sigma_cmd *cmd)
+{
+	int ret;
+	const char *val;
+	const char *intf = get_param(cmd, "Interface");
+	uint32_t param_value = 0x7;
+	char bssid[20];
+	char buf[100];
+
+	/* [6-8] rx_nss: max number of RX spatial streams */
+	val = get_param(cmd, "OMCtrl_RxNSS");
+	if (val) {
+		int rx_nss;
+
+		rx_nss = atoi(val);
+		if (rx_nss < 0 || rx_nss > 7) {
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"Invalid RxNSS value");
+			return -1;
+		}
+		param_value |= rx_nss << 6;
+	}
+
+	/* [9-10] ch_bw: channel width supported by STA for both reception and
+	 * transmission */
+	val = get_param(cmd, "OMCtrl_ChnlWidth");
+	if (val) {
+		int ch_bw;
+
+		ch_bw = atoi(val);
+		if (ch_bw < 0 || ch_bw > 3) {
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"Invalid ChannelWidth value");
+			return -1;
+		}
+		param_value |= ch_bw << 9;
+	}
+
+	/* [11] ulmu_dis: disable the transmission of UL MU */
+	val = get_param(cmd, "OMCtrl_ULMUDisable");
+	if (val) {
+		int ulmu_dis;
+
+		ulmu_dis = atoi(val);
+		if (ulmu_dis < 0 || ulmu_dis > 1) {
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"Invalid ULMUDisable value");
+			return -1;
+		}
+		param_value |= ulmu_dis << 11;
+	}
+
+	/* [12-14] tx_nsts: max number of TX space-time streams */
+	val = get_param(cmd, "OMCtrl_TxNSTS");
+	if (val) {
+		int tx_nsts;
+
+		tx_nsts = atoi(val);
+		if (tx_nsts < 0 || tx_nsts > 7) {
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"Invalid TxNSTS value");
+			return -1;
+		}
+		param_value |= tx_nsts << 12;
+	}
+
+	/* [17] ulmu_data_dis: disable the transmission of UL MU data */
+	val = get_param(cmd, "OMCtrl_ULMUDataDisable");
+	if (val) {
+		int ulmu_data_dis;
+
+		ulmu_data_dis = atoi(val);
+		if (ulmu_data_dis < 0 || ulmu_data_dis > 1) {
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"Invalid ULMUDataDisable value");
+			return -1;
+		}
+		param_value |= ulmu_data_dis << 17;
+	}
+
+	ret = get_wpa_status(intf, "bssid", bssid, sizeof(bssid));
+	if (ret < 0)
+		return ret;
+
+	snprintf(buf, sizeof(buf), "-t 3 -m 0 -v 0 -a %s 0x1c %d",
+		 bssid, param_value);
+	return fwtest_cmd_wrapper(dut, buf, intf);
+}
+
+
+static int mac80211_he_ltf_mapping(struct sigma_dut *dut,
+				   const char *val)
+{
+	if (strcmp(val, "3.2") == 0)
+		return 0;
+	if (strcmp(val, "6.4") == 0)
+		return 1;
+	if (strcmp(val, "12.8") == 0)
+		return 2;
+
+	sigma_dut_print(dut, DUT_MSG_ERROR, "Unsupported LTF value %s", val);
+	return -1;
+}
+
+
+static int mac80211_he_gi_mapping(struct sigma_dut *dut,
+				  const char *val)
+{
+	if (strcmp(val, "0.8") == 0)
+		return 9;
+	if (strcmp(val, "1.6") == 0)
+		return 10;
+	if (strcmp(val, "3.2") == 0)
+		return 11;
+
+	sigma_dut_print(dut, DUT_MSG_ERROR, "Unsupported GI value %s", val);
+	return -1;
+}
+
+
+static enum sigma_cmd_result mac80211_he_ltf(struct sigma_dut *dut,
+					     struct sigma_conn *conn,
+					     const char *intf,
+					     const char *val)
+{
+	free(dut->ar_ltf);
+	dut->ar_ltf = strdup(val);
+	if (!dut->ar_ltf) {
+		send_resp(dut, conn, SIGMA_ERROR,
+			  "errorCode,Failed to store new LTF");
+		return STATUS_SENT_ERROR;
+	}
+	return SUCCESS_SEND_STATUS;
+}
+
+
+static enum sigma_cmd_result mac80211_he_gi(struct sigma_dut *dut,
+					    const char *intf,
+					    const char *val)
+{
+	int16_t he_gi;
+	int ret = -1;
+	char buf[100];
+
+	he_gi = mac80211_he_gi_mapping(dut, val);
+	if (he_gi < 0)
+		return INVALID_SEND_STATUS;
+
+	if (dut->ar_ltf) {
+		int16_t he_ltf;
+		unsigned int value = 0;
+
+		he_ltf = mac80211_he_ltf_mapping(dut, dut->ar_ltf);
+		free(dut->ar_ltf);
+		dut->ar_ltf = NULL;
+
+		if (he_ltf < 0)
+			return ERROR_SEND_STATUS;
+
+		if (he_gi != 0xFF)
+			value |= 1 << he_gi;
+
+		if (he_ltf != 0xFF)
+			value |= 1 << he_ltf;
+
+		snprintf(buf, sizeof(buf), "-t 1 -m 0 -v 0 0x80 %d", value);
+		ret = fwtest_cmd_wrapper(dut, buf, intf);
+		if (ret < 0)
+			return ERROR_SEND_STATUS;
+
+		if (he_ltf != 0xFF) {
+			snprintf(buf, sizeof(buf), "-t 1 -m 0 -v 0 0x74 %d",
+				 he_ltf + 1);
+			ret = fwtest_cmd_wrapper(dut, buf, intf);
+			if (ret < 0)
+				return ERROR_SEND_STATUS;
+		}
+	} else if (he_gi != 0xFF) {
+		snprintf(buf, sizeof(buf), "-t 1 -m 0 -v 0 0x80 %d",
+			 1 << he_gi);
+		ret = fwtest_cmd_wrapper(dut, buf, intf);
+	}
+
+	if (ret < 0)
+		return ERROR_SEND_STATUS;
+
+	return SUCCESS_SEND_STATUS;
+}
+
+
+static enum sigma_cmd_result
+mac80211_sta_set_rfeature_he(const char *intf, struct sigma_dut *dut,
+			     struct sigma_conn *conn, struct sigma_cmd *cmd)
+{
+	const char *val;
+	enum sigma_cmd_result res;
+
+	val = get_param(cmd, "LTF");
+	if (val) {
+		res = mac80211_he_ltf(dut, conn, intf, val);
+		if (res != SUCCESS_SEND_STATUS)
+			return res;
+	}
+
+	val = get_param(cmd, "GI");
+	if (val || dut->ar_ltf) {
+		res = mac80211_he_gi(dut, intf, val);
+		if (res != SUCCESS_SEND_STATUS)
+			return res;
+	}
+
+	val = get_param(cmd, "transmitOMI");
+	if (val && mac80211_sta_transmit_omi(dut, conn, cmd)) {
+		send_resp(dut, conn, SIGMA_ERROR,
+			  "ErrorCode,sta_transmit_omi failed");
+		return STATUS_SENT_ERROR;
+	}
+
+	return SUCCESS_SEND_STATUS;
+}
+
+
 static enum sigma_cmd_result
 cmd_sta_set_rfeature_he(const char *intf, struct sigma_dut *dut,
 			struct sigma_conn *conn, struct sigma_cmd *cmd)
 {
 	switch (get_driver_type(dut)) {
+	case DRIVER_MAC80211:
+		return mac80211_sta_set_rfeature_he(intf, dut, conn, cmd);
 	case DRIVER_WCN:
 		return wcn_sta_set_rfeature_he(intf, dut, conn, cmd);
 	default:
@@ -19697,11 +20046,26 @@ cmd_sta_set_rfeature_loc_r2(const char *intf, struct sigma_dut *dut,
 			    struct sigma_conn *conn, struct sigma_cmd *cmd)
 {
 	const char *rnm_mfp = get_param(cmd, "RNM_MFP");
+	const char *urnm_mfpr_x20 = get_param(cmd, "URNM_MFPR_X20");
 
 	if (rnm_mfp) {
 		dut->rnm_mfp = atoi(rnm_mfp);
 		sigma_dut_print(dut, DUT_MSG_INFO,
 				"rnm_mfp value is %d", dut->rnm_mfp);
+	}
+
+	if (urnm_mfpr_x20) {
+		char buf[100];
+
+		dut->urnm_mfpr_x20 = strcasecmp(urnm_mfpr_x20, "Disable") != 0;
+		snprintf(buf, sizeof(buf), "SET urnm_mfpr_x20 %d",
+			 dut->urnm_mfpr_x20);
+
+		if (wpa_command(intf, buf) < 0) {
+			send_resp(dut, conn, SIGMA_ERROR,
+				  "ErrorCode,Failed to set urnm_mfpr_x20 flag");
+			return STATUS_SENT_ERROR;
+		}
 	}
 
 	return SUCCESS_SEND_STATUS;
@@ -19816,6 +20180,14 @@ static enum sigma_cmd_result cmd_sta_set_pwrsave(struct sigma_dut *dut,
 			res = set_ps(intf, dut, 1);
 	} else if (get_driver_type(dut) == DRIVER_WCN) {
 		return cmd_sta_set_power_save_wcn(intf, dut, conn, cmd);
+	} else if (prog && get_driver_type(dut) == DRIVER_MAC80211 &&
+		   strcasecmp(prog, "HE") == 0) {
+		if (strcasecmp(powersave, "On") == 0)
+			res = set_ps(intf, dut, 1);
+		else if (strcasecmp(powersave, "Off") == 0)
+			res = set_ps(intf, dut, 0);
+		else
+			return -1;
 	} else {
 		if (mode == NULL)
 			return -1;
