@@ -6014,6 +6014,30 @@ static enum sigma_cmd_result cmd_sta_associate(struct sigma_dut *dut,
 		}
 	}
 
+	if ((dut->program == PROGRAM_EHT || dut->device_mode == MODE_11BE) &&
+	    get_driver_type(dut) == DRIVER_MAC80211) {
+		/* Use wpa_supplicant control interface for mac80211 drivers. */
+		if (multi_link) {
+			sigma_dut_print(dut, DUT_MSG_DEBUG,
+					"multi link %s", multi_link);
+			if (strcasecmp(multi_link, "Enable") == 0)
+				strlcpy(buf, "SET mld_force_single_link 0",
+					sizeof(buf));
+			else
+				strlcpy(buf, "SET mld_force_single_link 1",
+					sizeof(buf));
+		} else {
+			sigma_dut_print(dut, DUT_MSG_DEBUG,
+					"multi link config is not present");
+			strlcpy(buf, "SET mld_force_single_link 1",
+				sizeof(buf));
+		}
+
+		if (wpa_command(ifname, buf) < 0)
+			sigma_dut_print(dut, DUT_MSG_INFO,
+					"Failed to set mld_force_single_link");
+	}
+
 	if (dut->rsne_override) {
 #ifdef NL80211_SUPPORT
 		if (get_driver_type(dut) == DRIVER_WCN) {
@@ -11635,6 +11659,10 @@ static void sta_reset_default_mac80211(struct sigma_dut *dut, const char *intf)
 			sigma_dut_print(dut, DUT_MSG_ERROR,
 					"addba buf size set err %d", ret);
 	}
+
+	/* Clear the wpa_supplicant single-link override. */
+	wpa_command(intf, "SET mld_force_single_link 0");
+
 }
 
 
