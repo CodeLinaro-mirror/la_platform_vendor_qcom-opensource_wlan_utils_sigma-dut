@@ -5103,6 +5103,10 @@ nl_done:
 			entry = "mlo_max_simultaneous_links";
 			debugfs_val = (u8) value;
 			break;
+		case STA_SET_EHT_EML_CAPABILITY:
+			entry = "eml_capa_present";
+			debugfs_val = !!value;
+			break;
 		default:
 			break;
 		}
