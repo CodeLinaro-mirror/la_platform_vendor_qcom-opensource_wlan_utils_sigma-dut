@@ -4269,6 +4269,57 @@ int ath6kl_client_uapsd(struct sigma_dut *dut, const char *intf, int uapsd)
 }
 
 
+static int ath12k_get_debugfs_file(const char *intf, const char *entry,
+				   char *fname, size_t fname_len)
+{
+	char path[128], phy_link[128], *pos;
+	ssize_t res;
+
+	res = snprintf(phy_link, sizeof(phy_link), "/sys/class/net/%s/phy80211",
+		       intf);
+	if (res < 0 || (size_t) res >= sizeof(phy_link))
+		return -1;
+
+	res = readlink(phy_link, path, sizeof(path));
+	if (res < 0 || res >= (int) sizeof(path))
+		return -1;
+
+	path[res] = '\0';
+	pos = strrchr(path, '/');
+	pos = pos ? pos + 1 : path;
+
+	res = snprintf(fname, fname_len,
+		       "/sys/kernel/debug/ieee80211/%s/ath12k/%s", pos, entry);
+	if (res < 0 || res >= (int) fname_len)
+		return -1;
+
+	return 0;
+}
+
+
+static int ath12k_write_debugfs_u8(struct sigma_dut *dut, const char *intf,
+				   const char *entry, u8 value)
+{
+	char fname[128];
+	FILE *f;
+
+	if (ath12k_get_debugfs_file(intf, entry, fname, sizeof(fname)))
+		return -1;
+
+	f = fopen(fname, "w");
+	if (!f)
+		return -1;
+
+	fprintf(f, "%u\n", (unsigned int) value);
+	fclose(f);
+
+	sigma_dut_print(dut, DUT_MSG_DEBUG, "Set %s=%u via %s",
+			entry, (unsigned int) value, fname);
+
+	return 0;
+}
+
+
 static enum sigma_cmd_result cmd_sta_set_uapsd(struct sigma_dut *dut,
 					       struct sigma_conn *conn,
 					       struct sigma_cmd *cmd)
@@ -4875,9 +4926,9 @@ static int sta_config_params(struct sigma_dut *dut, const char *intf,
 			     enum qca_sta_helper_config_params config_cmd,
 			     int value)
 {
+	int ret = -1;
 #ifdef NL80211_SUPPORT
 	struct nl_msg *msg;
-	int ret;
 	struct nlattr *params;
 	int ifindex;
 
@@ -5027,22 +5078,41 @@ static int sta_config_params(struct sigma_dut *dut, const char *intf,
 	nla_nest_end(msg, params);
 
 	ret = send_and_recv_msgs(dut, dut->nl_ctx, msg, NULL, NULL);
-	if (ret) {
-		sigma_dut_print(dut, DUT_MSG_ERROR,
-				"%s: err in send_and_recv_msgs, ret=%d",
-				__func__, ret);
-		return ret;
-	}
+	if (!ret)
+		return 0;
 
-	return 0;
+	sigma_dut_print(dut, DUT_MSG_ERROR,
+			"%s: err in send_and_recv_msgs, ret=%d",
+			__func__, ret);
+	goto nl_done;
 
 fail:
 	sigma_dut_print(dut, DUT_MSG_ERROR,
 			"%s: err in adding vendor_cmd and vendor_data",
 			__func__);
 	nlmsg_free(msg);
+nl_done:
 #endif /* NL80211_SUPPORT */
-	return -1;
+
+	if (get_driver_type(dut) == DRIVER_MAC80211) {
+		const char *entry = NULL;
+		u8 debugfs_val = 0;
+
+		switch (config_cmd) {
+		case STA_SET_EHT_MLO_MAX_SIMULTANEOUS_LINKS:
+			entry = "mlo_max_simultaneous_links";
+			debugfs_val = (u8) value;
+			break;
+		default:
+			break;
+		}
+
+		if (entry)
+			ret = ath12k_write_debugfs_u8(dut, intf, entry,
+						      debugfs_val);
+	}
+
+	return ret;
 }
 
 
