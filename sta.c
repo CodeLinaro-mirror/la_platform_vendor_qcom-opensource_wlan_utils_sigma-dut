@@ -5107,6 +5107,10 @@ nl_done:
 			entry = "eml_capa_present";
 			debugfs_val = !!value;
 			break;
+		case STA_SET_T2LM_NEG_SUPPORT:
+			entry = "ttlm_neg_support";
+			debugfs_val = (u8) value;
+			break;
 		default:
 			break;
 		}
