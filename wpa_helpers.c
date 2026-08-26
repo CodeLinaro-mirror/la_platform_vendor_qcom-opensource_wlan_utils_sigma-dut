@@ -103,13 +103,10 @@ const char * get_p2p_ifname(struct sigma_dut *dut, const char *primary_ifname)
 
 void dut_ifc_reset(struct sigma_dut *dut)
 {
-	char buf[256];
 	const char *ifc = get_station_ifname(dut);
 
-	snprintf(buf, sizeof(buf), "ifconfig %s down", ifc);
-	run_system(dut, buf);
-	snprintf(buf, sizeof(buf), "ifconfig %s up", ifc);
-	run_system(dut, buf);
+	run_if_down(dut, ifc);
+	run_if_up(dut, ifc);
 }
 
 
@@ -419,11 +416,17 @@ int get_wpa_ssid_bssid(struct sigma_dut *dut, const char *ifname,
 {
 	struct wpa_ctrl *ctrl;
 	char buf_local[4096];
+	char scan_resp[64];
 	char *network, *ssid, *bssid;
 	size_t buf_size_local;
 	unsigned int count = 0;
 	int len, res;
 	char *save_ptr_network = NULL;
+	static const char *scan_done_events[] = {
+		"CTRL-EVENT-SCAN-RESULTS",
+		"CTRL-EVENT-SCAN-FAILED",
+		NULL
+	};
 
 	ctrl = open_wpa_mon(ifname);
 	if (!ctrl) {
@@ -433,10 +436,39 @@ int get_wpa_ssid_bssid(struct sigma_dut *dut, const char *ifname,
 	}
 
 	wpa_command(ifname, "BSS_FLUSH");
-	if (wpa_command(ifname, "SCAN TYPE=ONLY")) {
+	scan_resp[0] = '\0';
+	res = wpa_command_resp(ifname, "SCAN TYPE=ONLY",
+			       scan_resp, sizeof(scan_resp));
+	scan_resp[strcspn(scan_resp, "\r\n")] = '\0';
+	sigma_dut_print(dut, DUT_MSG_DEBUG,
+			"Scan command attempt 1 response: ret=%d resp='%s'",
+			res, scan_resp);
+	if (res == 0 && strncmp(scan_resp, "FAIL-BUSY", 9) == 0) {
+		sigma_dut_print(dut, DUT_MSG_INFO,
+				"Scan command attempt 1 got FAIL-BUSY; waiting for current scan completion");
+		res = get_wpa_cli_events(dut, ctrl, scan_done_events,
+					 buf_local, sizeof(buf_local));
+		if (res < 0) {
+			wpa_ctrl_detach(ctrl);
+			wpa_ctrl_close(ctrl);
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"Timed out waiting for current scan completion after FAIL-BUSY");
+			return -1;
+		}
+		scan_resp[0] = '\0';
+		res = wpa_command_resp(ifname, "SCAN TYPE=ONLY",
+				       scan_resp, sizeof(scan_resp));
+		scan_resp[strcspn(scan_resp, "\r\n")] = '\0';
+		sigma_dut_print(dut, DUT_MSG_DEBUG,
+				"Scan command attempt 2 response: ret=%d resp='%s'",
+				res, scan_resp);
+	}
+	if (res < 0 || strncmp(scan_resp, "OK", 2) != 0) {
 		wpa_ctrl_detach(ctrl);
 		wpa_ctrl_close(ctrl);
-		sigma_dut_print(dut, DUT_MSG_ERROR, "SCAN command failed");
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"Scan command failed: ret=%d resp='%s'",
+				res, scan_resp);
 		return -1;
 	}
 
@@ -978,11 +1010,10 @@ int start_sta_mode(struct sigma_dut *dut)
 	}
 
 	if (dut->mode == SIGMA_MODE_SNIFFER && dut->sniffer_ifname) {
-		snprintf(buf, sizeof(buf), "ifconfig %s down",
-			 dut->sniffer_ifname);
-		if (system(buf) != 0) {
+		if (run_if_down(dut, dut->sniffer_ifname) != 0) {
 			sigma_dut_print(dut, DUT_MSG_INFO,
-					"Failed to run '%s'", buf);
+					"Failed to set %s down",
+					dut->sniffer_ifname);
 		}
 		snprintf(buf, sizeof(buf), "iw dev %s set type station",
 			 dut->sniffer_ifname);
