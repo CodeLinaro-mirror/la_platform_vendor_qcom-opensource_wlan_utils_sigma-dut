@@ -10027,6 +10027,8 @@ static int qca_nl80211_get_sta_info(struct sigma_dut *dut, const char *intf,
 	struct nl_msg *msg;
 	int ifindex, ret;
 
+	memset(sta_data, 0, sizeof(*sta_data));
+
 	ifindex = if_nametoindex(intf);
 	if (ifindex == 0) {
 		sigma_dut_print(dut, DUT_MSG_ERROR,
