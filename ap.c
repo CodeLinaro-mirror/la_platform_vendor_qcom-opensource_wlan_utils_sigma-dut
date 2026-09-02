@@ -136,7 +136,8 @@ int fwtest_cmd_wrapper(struct sigma_dut *dut, const char *arg,
 {
 	int ret = -1;
 
-	if (strncmp(dut->device_driver, "ath11k", 6) == 0)
+	if (strncmp(dut->device_driver, "ath11k", 6) == 0 ||
+	    strncmp(dut->device_driver, "ath12k", 6) == 0)
 		ret = run_system_wrapper(dut, "ath11k-fwtest -i %s %s",
 					 ifname, arg);
 
@@ -982,6 +983,18 @@ static int get_bitmap_from_punct_chlist(struct sigma_dut *dut,
 		ap_channel = dut->ap_channel;
 		ap_band = dut->ap_band;
 	} else {
+		if (mlo_band < 0) {
+			int i;
+
+			for (i = 0; i < AP_BAND_MAX; i++) {
+				if (dut->ap_mlo_links[i].configured) {
+					mlo_band = i;
+					break;
+				}
+			}
+			if (mlo_band < 0)
+				return -1;
+		}
 		ap_chwidth = dut->ap_mlo_links[mlo_band].chwidth;
 		ap_channel = dut->ap_mlo_links[mlo_band].channel;
 		ap_band = mlo_band;
@@ -1102,7 +1115,6 @@ static enum sigma_cmd_result cmd_ap_set_wireless(struct sigma_dut *dut,
 	const char *val;
 	unsigned int wlan_tag = 1;
 	const char *ifname = get_main_ifname(dut);
-	char buf[128];
 	int subeamformermode = 0;
 	int mlo_config_band = -1;
 
@@ -1177,7 +1189,9 @@ static enum sigma_cmd_result cmd_ap_set_wireless(struct sigma_dut *dut,
 
 	val = get_param(cmd, "Interface");
 	if (val) {
-		if (strcasecmp(val, "5G") == 0) {
+		if (strcasecmp(val, "5G") == 0 ||
+		    strcasecmp(val, "5.0G") == 0 ||
+		    strcasecmp(val, "5.0") == 0) {
 			dut->ap_interface_5g = 1;
 			dut->ap_band = AP_BAND_5GHz;
 			if (dut->ap_mode == AP_11be) {
@@ -1194,7 +1208,9 @@ static enum sigma_cmd_result cmd_ap_set_wireless(struct sigma_dut *dut,
 						treat_6ghz_as_5ghz = true;
 				}
 			}
-		} else if (strcasecmp(val, "24G") == 0) {
+		} else if (strcasecmp(val, "24G") == 0 ||
+			   strcasecmp(val, "2.4G") == 0 ||
+			   strcasecmp(val, "2.4") == 0) {
 			dut->ap_interface_2g = 1;
 			dut->ap_band = AP_BAND_24GHz;
 			if (dut->ap_mode == AP_11be) {
@@ -1213,9 +1229,12 @@ static enum sigma_cmd_result cmd_ap_set_wireless(struct sigma_dut *dut,
 				mlo_config_band = AP_BAND_6GHz;
 			}
 		} else {
-			send_resp(dut, conn, SIGMA_INVALID,
-				  "errorCode,Invalid Interface");
-			return STATUS_SENT;
+			/* Ignore interface names (e.g. wlan0) that are not band
+			 * designators; ap_set_wireless uses get_main_ifname()
+			 * and does not need an explicit interface name here. */
+			sigma_dut_print(dut, DUT_MSG_DEBUG,
+					"ap_set_wireless: ignoring non-band Interface value '%s'",
+					val);
 		}
 
 		if (dut->ap_mode != AP_11be &&
@@ -1426,8 +1445,16 @@ static enum sigma_cmd_result cmd_ap_set_wireless(struct sigma_dut *dut,
 		dut->ap_bcnint = atoi(val);
 
 	val = get_param(cmd, "DTIM");
-	if (val && dut->ap_mode == AP_11be)
-		dut->ap_mlo_links[mlo_config_band].dtim = atoi(val);
+	if (val && dut->ap_mode == AP_11be) {
+		if (mlo_config_band > -1) {
+			dut->ap_mlo_links[mlo_config_band].dtim = atoi(val);
+		} else {
+			int i;
+
+			for (i = 0; i < AP_BAND_MAX; i++)
+				dut->ap_mlo_links[i].dtim = atoi(val);
+		}
+	}
 
 	val = get_param(cmd, "RADIO");
 	if (val) {
@@ -1666,7 +1693,7 @@ static enum sigma_cmd_result cmd_ap_set_wireless(struct sigma_dut *dut,
 	}
 
 	val = get_param(cmd, "WIDTH");
-	if (val && dut->ap_mode != AP_11be && mlo_config_band > -1) {
+	if (val && dut->ap_mode == AP_11be && mlo_config_band > -1) {
 		if (strcasecmp(val, "20") == 0) {
 			dut->ap_mlo_links[mlo_config_band].chwidth = AP_20;
 		} else if (strcasecmp(val, "40") == 0) {
@@ -2302,12 +2329,10 @@ static enum sigma_cmd_result cmd_ap_set_wireless(struct sigma_dut *dut,
 		mtu = dut->amsdu_size - IEEE80211_SNAP_LEN_DMG;
 		sigma_dut_print(dut, DUT_MSG_DEBUG,
 				"Setting amsdu_size to %d", mtu);
-		snprintf(buf, sizeof(buf), "ifconfig %s mtu %d",
-			 get_station_ifname(dut), mtu);
 
-		if (system(buf) != 0) {
-			sigma_dut_print(dut, DUT_MSG_ERROR, "Failed to set %s",
-					buf);
+		if (run_if_mtu(dut, get_station_ifname(dut), mtu) != 0) {
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"Failed to set amsdu_size: %d", mtu);
 			return ERROR_SEND_STATUS;
 		}
 	}
@@ -2700,10 +2725,7 @@ static void ath_inject_frame(struct sigma_dut *dut, const char *ifname, int tid)
 	if (system(buf) != 0)
 		return;
 
-	snprintf(buf, sizeof(buf),
-		 "ifconfig %s | grep HWaddr | cut -b 39-56 >> %s",
-		 ifname, VI_QOS_TMP_FILE);
-	if (system(buf) != 0)
+	if (run_append_hwaddr(dut, ifname, VI_QOS_TMP_FILE) != 0)
 		sigma_dut_print(dut, DUT_MSG_ERROR, "Retrieve HWaddr failed");
 
 	snprintf(buf, sizeof(buf), "sed -n '3,$p' %s >> %s",
@@ -5880,11 +5902,17 @@ static int cmd_wcn_ap_config_commit(struct sigma_dut *dut,
 
 	sigma_dut_print(dut, DUT_MSG_INFO, "setting ip addr %s mask %s",
 			ap_inet_addr, ap_inet_mask);
-	snprintf(buf, sizeof(buf), "ifconfig %s %s netmask %s up",
-		 get_main_ifname(dut), ap_inet_addr, ap_inet_mask);
-	if (system(buf) != 0) {
+
+	if (run_ipv4_addr(dut, get_main_ifname(dut), ap_inet_addr,
+			  ap_inet_mask) != 0) {
 		sigma_dut_print(dut, DUT_MSG_ERROR,
 				"Failed to intialize the interface");
+		return -1;
+	}
+
+	if (run_if_up(dut, get_main_ifname(dut)) != 0) {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"Failed to set %s up", get_main_ifname(dut));
 		return -1;
 	}
 
@@ -9073,11 +9101,10 @@ enum sigma_cmd_result cmd_ap_config_commit(struct sigma_dut *dut,
 	}
 
 	if (dut->mode == SIGMA_MODE_SNIFFER && dut->sniffer_ifname) {
-		snprintf(buf, sizeof(buf), "ifconfig %s down",
-			 dut->sniffer_ifname);
-		if (system(buf) != 0) {
+		if (run_if_down(dut, dut->sniffer_ifname) != 0) {
 			sigma_dut_print(dut, DUT_MSG_INFO,
-					"Failed to run '%s'", buf);
+					"Failed to set sniffer interface %s down",
+					dut->sniffer_ifname);
 		}
 		snprintf(buf, sizeof(buf), "iw dev %s set type station",
 			 dut->sniffer_ifname);
@@ -10074,7 +10101,7 @@ skip_key_mgmt:
 
 	if ((dut->program == PROGRAM_VHT) ||
 	    ((dut->program == PROGRAM_HE || dut->program == PROGRAM_EHT ||
-	      dut->program == PROGRAM_WPA3) &&
+	      dut->program == PROGRAM_WPA3 || dut->program == PROGRAM_PR) &&
 	     dut->use_5g)) {
 		int vht_oper_centr_freq_idx;
 		int chan, chwidth, band;
@@ -10499,11 +10526,17 @@ skip_vht_parameters_set:
 		sigma_dut_print(dut, DUT_MSG_INFO,
 				"setting ip addr %s mask %s ifname %s",
 				ap_inet_addr, ap_inet_mask, ifname_ptr);
-		snprintf(buf, sizeof(buf), "ifconfig %s %s netmask %s up",
-			 ifname_ptr, ap_inet_addr, ap_inet_mask);
-		if (system(buf) != 0) {
+
+		if (run_ipv4_addr(dut, ifname_ptr, ap_inet_addr,
+				  ap_inet_mask) != 0) {
 			sigma_dut_print(dut, DUT_MSG_ERROR,
 					"Failed to initialize the interface");
+			return -1;
+		}
+
+		if (run_if_up(dut, ifname_ptr) != 0) {
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"Failed to set %s up", ifname_ptr);
 			return -1;
 		}
 	}
@@ -10631,8 +10664,7 @@ skip_vht_parameters_set:
 		fwtest_set_he_params(dut, ifname);
 
 	if (dut->bridge && dut->ap_is_dual) {
-		if (run_system_wrapper(dut, "ifconfig %s up", dut->bridge)
-		    != 0) {
+		if (run_if_up(dut, dut->bridge) != 0) {
 			sigma_dut_print(dut, DUT_MSG_ERROR,
 					"Failed to set bridge interface up");
 			return -1;
@@ -11156,7 +11188,6 @@ static enum sigma_cmd_result cmd_ap_reset_default(struct sigma_dut *dut,
 {
 	const char *type, *program;
 	enum driver_type drv;
-	char buf[128];
 	int i;
 	const char *ifname;
 	char ifname2[50];
@@ -11626,12 +11657,10 @@ static enum sigma_cmd_result cmd_ap_reset_default(struct sigma_dut *dut,
 
 		sigma_dut_print(dut, DUT_MSG_DEBUG,
 				"Setting msdu_size to MAX: 7912");
-		snprintf(buf, sizeof(buf), "ifconfig %s mtu 7912",
-			 get_main_ifname(dut));
 
-		if (system(buf) != 0) {
-			sigma_dut_print(dut, DUT_MSG_ERROR, "Failed to set %s",
-					buf);
+		if (run_if_mtu(dut, get_main_ifname(dut), 7912) != 0) {
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"Failed to set MTU for msdu_size 7912");
 			return ERROR_SEND_STATUS;
 		}
 
@@ -11933,7 +11962,7 @@ static int ap_inject_frame(struct sigma_dut *dut, struct sigma_conn *conn,
 		}
 	}
 
-	if (system("ifconfig sigmadut up") != 0) {
+	if (run_if_up(dut, "sigmadut") != 0) {
 		sigma_dut_print(dut, DUT_MSG_ERROR, "Failed to set "
 				"monitor interface up");
 		return -2;
@@ -12609,9 +12638,9 @@ static int ath_ap_send_frame_btm_req(struct sigma_dut *dut,
 			   mac_addr[0], mac_addr[1], mac_addr[2],
 			   mac_addr[3], mac_addr[4], mac_addr[5]);
 		inform_and_sleep(dut, 2);
-		run_system_wrapper(dut, "ifconfig %s down", ifname);
+		run_if_down(dut, ifname);
 		inform_and_sleep(dut, 5);
-		run_system_wrapper(dut, "ifconfig %s up", ifname);
+		run_if_up(dut, ifname);
 	} else if (dut->ap_btmreq_disassoc_imnt) {
 		inform_and_sleep(dut, (disassoc_timer / 1000) + 1);
 		run_iwpriv(dut, ifname, "kickmac %02x:%02x:%02x:%02x:%02x:%02x",
