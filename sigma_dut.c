@@ -3,6 +3,7 @@
  * Copyright (c) 2010-2011, Atheros Communications, Inc.
  * Copyright (c) 2011-2017, Qualcomm Atheros, Inc.
  * Copyright (c) 2018-2021, The Linux Foundation
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  * All Rights Reserved.
  * Licensed under the Clear BSD license. See README for more details.
  */
@@ -895,6 +896,8 @@ static void set_defaults(struct sigma_dut *dut)
 	dut->autoconnect_default = 1;
 	set_host_name(dut);
 	dut->pasn_type = 0xf;
+	dut->ifconfig_avail = SIGMA_CMD_UNKNOWN;
+	dut->ip_avail = SIGMA_CMD_UNKNOWN;
 }
 
 

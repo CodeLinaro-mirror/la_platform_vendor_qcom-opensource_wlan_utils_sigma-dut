@@ -3,6 +3,7 @@
  * Copyright (c) 2010, Atheros Communications, Inc.
  * Copyright (c) 2011-2017, Qualcomm Atheros, Inc.
  * Copyright (c) 2018-2020, The Linux Foundation
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  * All Rights Reserved.
  * Licensed under the Clear BSD license. See README for more details.
  */
@@ -13,8 +14,8 @@
 #define TG_MAX_CLIENTS_CONNECTIONS 1
 
 /* Limited bit rate generator related constant or threshold values */
-  /* 25 Mbps per stream */
-#define WFA_SEND_FIX_BITRATE_MAX             25 * 1024 * 1024
+  /* 100 Mbps per stream */
+#define WFA_SEND_FIX_BITRATE_MAX             100 * 1024 * 1024
 
 /* To send periodic data for VO-Enterprise tests */
 extern int sigma_periodic_data;
