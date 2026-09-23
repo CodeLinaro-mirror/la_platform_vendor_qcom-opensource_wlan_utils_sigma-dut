@@ -2118,7 +2118,7 @@ static int set_wpa_common(struct sigma_dut *dut, struct sigma_conn *conn,
 	char *pos;
 	int id, rem, ret;
 	int cipher_set = 0;
-	int owe, sae;
+	int owe, eppke, sae;
 	int suite_b = 0;
 
 	id = add_network_common(dut, conn, ifname, cmd);
@@ -2127,11 +2127,14 @@ static int set_wpa_common(struct sigma_dut *dut, struct sigma_conn *conn,
 
 	val = get_param(cmd, "Type");
 	owe = val && strcasecmp(val, "OWE") == 0;
+	eppke = val && strcasecmp(val, "EPPKE") == 0;
 	sae = val && strcasecmp(val, "SAE") == 0;
 
 	val = get_param(cmd, "keyMgmtType");
 	if (!val && owe)
 		val = "OWE";
+	else if (!val && eppke)
+		val = "EPPKE";
 	if (val == NULL) {
 		/* keyMgmtType is being replaced with AKMSuiteType, so ignore
 		 * this missing parameter and assume proto=WPA2. */
@@ -2155,7 +2158,8 @@ static int set_wpa_common(struct sigma_dut *dut, struct sigma_conn *conn,
 		suite_b = 1;
 		if (set_network(ifname, id, "proto", "WPA2") < 0)
 			return -2;
-	} else if (strcasecmp(val, "OWE") == 0) {
+	} else if (strcasecmp(val, "OWE") == 0 ||
+		   strcasecmp(val, "EPPKE") == 0) {
 	} else if (strcasecmp(val, "WPA3") == 0) {
 		if (set_network(ifname, id, "proto", "RSN") < 0)
 			return -2;
@@ -2262,7 +2266,7 @@ static int set_wpa_common(struct sigma_dut *dut, struct sigma_conn *conn,
 			return ERROR_SEND_STATUS;
 	}
 
-	if (!cipher_set && !owe) {
+	if (!cipher_set && !owe && !eppke) {
 		send_resp(dut, conn, SIGMA_ERROR,
 			  "errorCode,Missing encpType and PairwiseCipher");
 		return 0;
@@ -2448,7 +2452,7 @@ static int set_wpa_common(struct sigma_dut *dut, struct sigma_conn *conn,
 			send_resp(dut, conn, SIGMA_INVALID, "errorCode,Unrecognized PMF value");
 			return 0;
 		}
-	} else if (owe || suite_b) {
+	} else if (owe || eppke || suite_b) {
 		dut->sta_pmf = STA_PMF_REQUIRED;
 		if (set_network(ifname, id, "ieee80211w", "2") < 0)
 			return -2;
@@ -3705,6 +3709,52 @@ static enum sigma_cmd_result sta_set_owe(struct sigma_dut *dut,
 }
 
 
+static enum sigma_cmd_result sta_set_eppke(struct sigma_dut *dut,
+					    struct sigma_conn *conn,
+					    struct sigma_cmd *cmd)
+{
+	const char *intf = get_param(cmd, "Interface");
+	const char *ifname, *val;
+	int id;
+
+	if (intf == NULL)
+		return INVALID_SEND_STATUS;
+
+	if (strcmp(intf, get_main_ifname(dut)) == 0)
+		ifname = get_station_ifname(dut);
+	else
+		ifname = intf;
+
+	id = set_wpa_common(dut, conn, ifname, cmd);
+	if (id < 0)
+		return id;
+
+	val = get_param(cmd, "AKMSuiteType");
+	if (!val && set_network(ifname, id, "key_mgmt", "EPPKE") < 0)
+		return ERROR_SEND_STATUS;
+
+	if (wpa_command(ifname, "SET pasn_groups ") != 0) {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"Failed to clear pasn_groups");
+		return ERROR_SEND_STATUS;
+	}
+
+	val = get_param(cmd, "ECGroupID");
+	if (val) {
+		char buf[64];
+
+		snprintf(buf, sizeof(buf), "SET pasn_groups %s", val);
+		if (wpa_command(ifname, buf) != 0) {
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"Failed to set pasn_groups");
+			return ERROR_SEND_STATUS;
+		}
+	}
+
+	return SUCCESS_SEND_STATUS;
+}
+
+
 static int get_key_mgmt_capa(struct sigma_dut *dut)
 {
 	char key_mgmt[500];
@@ -4110,6 +4160,8 @@ static enum sigma_cmd_result cmd_sta_set_security(struct sigma_dut *dut,
 		return sta_set_open(dut, conn, cmd);
 	if (strcasecmp(type, "OWE") == 0)
 		return sta_set_owe(dut, conn, cmd);
+	if (strcasecmp(type, "EPPKE") == 0)
+		return sta_set_eppke(dut, conn, cmd);
 	if (strcasecmp(type, "PSK") == 0 ||
 	    strcasecmp(type, "PSK-SAE") == 0 ||
 	    strcasecmp(type, "SAE") == 0 ||
