@@ -57,10 +57,16 @@ static enum sigma_cmd_result cmd_traffic_send_ping(struct sigma_dut *dut,
 		return STATUS_SENT;
 	}
 
-	if (type == 2 && dut->program == PROGRAM_P2P)
-		iface = get_p2p_group_ifname(dut, get_main_ifname(dut));
-	else
+	if (type == 2 && dut->program == PROGRAM_P2P) {
+		const char *main_iface = get_main_ifname(dut);
+
+		/* Try p2p-* prefix first; fall back to use active p2p0 */
+		iface = get_p2p_group_ifname(dut, main_iface);
+		if (strcmp(iface, main_iface) == 0)
+			iface = get_group_ifname(dut, main_iface);
+	} else {
 		iface = get_station_ifname(dut);
+	}
 
 	dst = get_param(cmd, "destination");
 	if (dst == NULL || (type == 1 && !is_ip_addr(dst)) ||
