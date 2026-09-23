@@ -2813,6 +2813,23 @@ static enum sigma_cmd_result cmd_sta_set_psk(struct sigma_dut *dut,
 		}
 	}
 
+	if ((type && strcasecmp(type, "EPPKE-PSK-SAE") == 0) ||
+	    (dut->akm_values & (1 << AKM_EPPKE))) {
+		if (val) {
+			snprintf(buf, sizeof(buf), "SET pasn_groups %s", val);
+			if (wpa_command(ifname, buf) != 0) {
+				sigma_dut_print(dut, DUT_MSG_ERROR,
+						"Failed to set pasn_groups");
+				return -2;
+			}
+		} else if (wpa_command(ifname, "SET pasn_groups ") != 0) {
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"Failed to clear pasn_groups");
+			return -2;
+		}
+
+	}
+
 	val = get_param(cmd, "InvalidSAEElement");
 	if (val) {
 		free(dut->sae_commit_override);
