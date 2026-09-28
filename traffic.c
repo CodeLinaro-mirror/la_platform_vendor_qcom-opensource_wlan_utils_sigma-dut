@@ -27,6 +27,58 @@
 #endif /* ANDROID */
 
 
+/*
+ * Wait for IPv6 Duplicate Address Detection (DAD) to complete on an interface.
+ * Polls "ip -6 addr show" for the "tentative" flag every 200 ms.
+ * Returns 0 when DAD is complete, -1 on timeout.
+ */
+static int wait_for_dad_complete(struct sigma_dut *dut, const char *ifname,
+				 unsigned int timeout_ms)
+{
+	char cmd[200];
+	char buf[1024];
+	unsigned int elapsed = 0;
+	const int poll_interval_ms = 200;
+
+	snprintf(cmd, sizeof(cmd), "ip -6 addr show dev %s scope link", ifname);
+	sigma_dut_print(dut, DUT_MSG_INFO, "DAD check cmd: %s", cmd);
+
+	while (elapsed < timeout_ms) {
+		FILE *f = popen(cmd, "r");
+		bool tentative = false;
+
+		if (!f) {
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"Failed to run: %s", cmd);
+			return -1;
+		}
+
+		while (fgets(buf, sizeof(buf), f)) {
+			if (strstr(buf, "tentative")) {
+				tentative = true;
+				break;
+			}
+		}
+		pclose(f);
+
+		if (!tentative) {
+			sigma_dut_print(dut, DUT_MSG_INFO,
+					"DAD complete on %s (%u ms)",
+					ifname, elapsed);
+			return 0;
+		}
+
+		usleep(poll_interval_ms * 1000);
+		elapsed += poll_interval_ms;
+	}
+
+	sigma_dut_print(dut, DUT_MSG_ERROR,
+			"DAD did not complete on %s after %u ms", ifname,
+			timeout_ms);
+	return -1;
+}
+
+
 static enum sigma_cmd_result cmd_traffic_send_ping(struct sigma_dut *dut,
 						   struct sigma_conn *conn,
 						   struct sigma_cmd *cmd)
@@ -165,6 +217,18 @@ static enum sigma_cmd_result cmd_traffic_send_ping(struct sigma_dut *dut,
 		snprintf(intf_arg, sizeof(intf_arg), " -I %s", iface);
 	else
 		intf_arg[0] = '\0';
+
+	/*
+	 * Wait for IPv6 DAD to complete before sending ping6. After
+	 * set_ipv6_addr() assigns a link-local address, it enters TENTATIVE
+	 * state while DAD probes are sent (~1-2s). Wait here so ping6 doesn't
+	 * fail with EADDRNOTAVAIL.
+	 */
+	if (type == 2 && wait_for_dad_complete(dut, iface, 3000) < 0)
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"DAD may not be complete on %s, proceeding with ping anyway",
+				iface);
+
 	fprintf(f, "#!" SHELL "\n"
 		"ping%s%s -c %d%s -s %d%s -q%s %s > %s"
 		"/sigma_dut-ping.%d &\n"

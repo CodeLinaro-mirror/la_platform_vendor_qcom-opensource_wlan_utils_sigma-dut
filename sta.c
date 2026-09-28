@@ -4269,6 +4269,57 @@ int ath6kl_client_uapsd(struct sigma_dut *dut, const char *intf, int uapsd)
 }
 
 
+static int ath12k_get_debugfs_file(const char *intf, const char *entry,
+				   char *fname, size_t fname_len)
+{
+	char path[128], phy_link[128], *pos;
+	ssize_t res;
+
+	res = snprintf(phy_link, sizeof(phy_link), "/sys/class/net/%s/phy80211",
+		       intf);
+	if (res < 0 || (size_t) res >= sizeof(phy_link))
+		return -1;
+
+	res = readlink(phy_link, path, sizeof(path));
+	if (res < 0 || res >= (int) sizeof(path))
+		return -1;
+
+	path[res] = '\0';
+	pos = strrchr(path, '/');
+	pos = pos ? pos + 1 : path;
+
+	res = snprintf(fname, fname_len,
+		       "/sys/kernel/debug/ieee80211/%s/ath12k/%s", pos, entry);
+	if (res < 0 || res >= (int) fname_len)
+		return -1;
+
+	return 0;
+}
+
+
+static int ath12k_write_debugfs_u8(struct sigma_dut *dut, const char *intf,
+				   const char *entry, u8 value)
+{
+	char fname[128];
+	FILE *f;
+
+	if (ath12k_get_debugfs_file(intf, entry, fname, sizeof(fname)))
+		return -1;
+
+	f = fopen(fname, "w");
+	if (!f)
+		return -1;
+
+	fprintf(f, "%u\n", (unsigned int) value);
+	fclose(f);
+
+	sigma_dut_print(dut, DUT_MSG_DEBUG, "Set %s=%u via %s",
+			entry, (unsigned int) value, fname);
+
+	return 0;
+}
+
+
 static enum sigma_cmd_result cmd_sta_set_uapsd(struct sigma_dut *dut,
 					       struct sigma_conn *conn,
 					       struct sigma_cmd *cmd)
@@ -4875,9 +4926,9 @@ static int sta_config_params(struct sigma_dut *dut, const char *intf,
 			     enum qca_sta_helper_config_params config_cmd,
 			     int value)
 {
+	int ret = -1;
 #ifdef NL80211_SUPPORT
 	struct nl_msg *msg;
-	int ret;
 	struct nlattr *params;
 	int ifindex;
 
@@ -5027,22 +5078,49 @@ static int sta_config_params(struct sigma_dut *dut, const char *intf,
 	nla_nest_end(msg, params);
 
 	ret = send_and_recv_msgs(dut, dut->nl_ctx, msg, NULL, NULL);
-	if (ret) {
-		sigma_dut_print(dut, DUT_MSG_ERROR,
-				"%s: err in send_and_recv_msgs, ret=%d",
-				__func__, ret);
-		return ret;
-	}
+	if (!ret)
+		return 0;
 
-	return 0;
+	sigma_dut_print(dut, DUT_MSG_ERROR,
+			"%s: err in send_and_recv_msgs, ret=%d",
+			__func__, ret);
+	goto nl_done;
 
 fail:
 	sigma_dut_print(dut, DUT_MSG_ERROR,
 			"%s: err in adding vendor_cmd and vendor_data",
 			__func__);
 	nlmsg_free(msg);
+nl_done:
 #endif /* NL80211_SUPPORT */
-	return -1;
+
+	if (get_driver_type(dut) == DRIVER_MAC80211) {
+		const char *entry = NULL;
+		u8 debugfs_val = 0;
+
+		switch (config_cmd) {
+		case STA_SET_EHT_MLO_MAX_SIMULTANEOUS_LINKS:
+			entry = "mlo_max_simultaneous_links";
+			debugfs_val = (u8) value;
+			break;
+		case STA_SET_EHT_EML_CAPABILITY:
+			entry = "eml_capa_present";
+			debugfs_val = !!value;
+			break;
+		case STA_SET_T2LM_NEG_SUPPORT:
+			entry = "ttlm_neg_support";
+			debugfs_val = (u8) value;
+			break;
+		default:
+			break;
+		}
+
+		if (entry)
+			ret = ath12k_write_debugfs_u8(dut, intf, entry,
+						      debugfs_val);
+	}
+
+	return ret;
 }
 
 
@@ -6012,6 +6090,30 @@ static enum sigma_cmd_result cmd_sta_associate(struct sigma_dut *dut,
 			sta_config_params(dut, intf,
 					  STA_SET_EHT_MLO_MAX_NUM_LINKS, 1);
 		}
+	}
+
+	if ((dut->program == PROGRAM_EHT || dut->device_mode == MODE_11BE) &&
+	    get_driver_type(dut) == DRIVER_MAC80211) {
+		/* Use wpa_supplicant control interface for mac80211 drivers. */
+		if (multi_link) {
+			sigma_dut_print(dut, DUT_MSG_DEBUG,
+					"multi link %s", multi_link);
+			if (strcasecmp(multi_link, "Enable") == 0)
+				strlcpy(buf, "SET mld_force_single_link 0",
+					sizeof(buf));
+			else
+				strlcpy(buf, "SET mld_force_single_link 1",
+					sizeof(buf));
+		} else {
+			sigma_dut_print(dut, DUT_MSG_DEBUG,
+					"multi link config is not present");
+			strlcpy(buf, "SET mld_force_single_link 1",
+				sizeof(buf));
+		}
+
+		if (wpa_command(ifname, buf) < 0)
+			sigma_dut_print(dut, DUT_MSG_INFO,
+					"Failed to set mld_force_single_link");
 	}
 
 	if (dut->rsne_override) {
@@ -8260,6 +8362,23 @@ cmd_sta_preset_testparameters(struct sigma_dut *dut, struct sigma_conn *conn,
 		if (wpa_command(intf, buf) != 0) {
 			send_resp(dut, conn, SIGMA_ERROR,
 				"ErrorCode,Failed to set random RSNXE data");
+			return STATUS_SENT_ERROR;
+		}
+	}
+
+	val = get_param(cmd, "PMKID_Initial");
+	if (val) {
+		int pmkid_cnt = atoi(val);
+		char buf[30];
+		int len;
+
+		len = snprintf(buf, sizeof(buf), "TEST_RANDOM_PMKID_COUNT %d",
+			       pmkid_cnt);
+
+		if (len < 0 || len >= sizeof(buf) ||
+		    wpa_command(intf, buf) != 0) {
+			send_resp(dut, conn, SIGMA_ERROR,
+				  "ErrorCode,Failed to update PMKID_Initial");
 			return STATUS_SENT_ERROR;
 		}
 	}
@@ -11618,6 +11737,10 @@ static void sta_reset_default_mac80211(struct sigma_dut *dut, const char *intf)
 			sigma_dut_print(dut, DUT_MSG_ERROR,
 					"addba buf size set err %d", ret);
 	}
+
+	/* Clear the wpa_supplicant single-link override. */
+	wpa_command(intf, "SET mld_force_single_link 0");
+
 }
 
 
