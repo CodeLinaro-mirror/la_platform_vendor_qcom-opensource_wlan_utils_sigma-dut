@@ -7,6 +7,7 @@
 
 #include "sigma_dut.h"
 #include "wpa_helpers.h"
+#include <stdint.h>
 #include <netinet/if_ether.h>
 #include <netinet/ip.h>
 #include <netinet/udp.h>
@@ -267,4 +268,24 @@ void process_fils_hlp(struct sigma_dut *dut)
 				"FILS_HLP thread creation failed");
 	}
 
+}
+
+int do_dhcp(char *ifname)
+{
+    (void)ifname;
+    return -1;
+}
+
+void get_dhcp_info(uint32_t *ipaddr, uint32_t *gateway,
+                   uint32_t *prefixLength, uint32_t *dns1,
+                   uint32_t *dns2, uint32_t *serverAddress,
+                   uint32_t *lease)
+{
+    if (ipaddr) *ipaddr = 0;
+    if (gateway) *gateway = 0;
+    if (prefixLength) *prefixLength = 0;
+    if (dns1) *dns1 = 0;
+    if (dns2) *dns2 = 0;
+    if (serverAddress) *serverAddress = 0;
+    if (lease) *lease = 0;
 }
