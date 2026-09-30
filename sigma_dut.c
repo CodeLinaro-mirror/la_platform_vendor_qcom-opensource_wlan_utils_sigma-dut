@@ -40,9 +40,6 @@ char *sigma_cert_path = "/etc/wpa_supplicant";
 int sigma_wmm_ac = 0;
 
 
-#if defined(ANDROID) || defined(LINUX_EMBEDDED)
-#include <android/log.h>
-
 #ifdef ANDROID_WIFI_HAL
 
 static void * wifi_hal_event_thread(void *ptr)
@@ -88,6 +85,10 @@ int wifi_hal_initialize(struct sigma_dut *dut)
 
 #endif /* ANDROID_WIFI_HAL */
 
+
+#ifdef ANDROID
+
+#include <android/log.h>
 
 static enum android_LogPriority level_to_android_priority(int level)
 {
