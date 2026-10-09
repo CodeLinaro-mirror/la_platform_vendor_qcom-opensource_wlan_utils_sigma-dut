@@ -1643,7 +1643,7 @@ int sigma_nan_pairing_setup(struct sigma_dut *dut, struct sigma_conn *conn,
 	}
 
 	if (strcasecmp(pairing_setup_pasn, "Responder") == 0) {
-		nan_parse_mac_address(dut, mac, dut->peer_info.peer_mac_addr);
+		nan_parse_mac_address(dut, mac, (u8 *)dut->peer_info.peer_mac_addr);
 		dut->peer_info.role = SECURE_NAN_PAIRING_INITIATOR;
 		dut->dev_info.role = SECURE_NAN_PAIRING_RESPONDER;
 		sigma_dut_print(dut, DUT_MSG_INFO,
@@ -1673,7 +1673,7 @@ int sigma_nan_pairing_setup(struct sigma_dut *dut, struct sigma_conn *conn,
 		sigma_dut_print(dut, DUT_MSG_INFO,
 				"Pairing request with unmatched peer");
 
-	strlcpy(req.key_info.body.passphrase_info.passphrase,
+	strlcpy((char *)req.key_info.body.passphrase_info.passphrase,
 		dut->dev_info.password,
 		sizeof(req.key_info.body.passphrase_info.passphrase));
 
@@ -1785,7 +1785,7 @@ void nan_event_pairing_request_indication(NanPairingRequestInd *event)
 
 	if (msg.nan_pairing_request_type == NAN_PAIRING_SETUP) {
 		msg.key_info.key_type = NAN_SECURITY_KEY_INPUT_PASSPHRASE;
-		strlcpy(msg.key_info.body.passphrase_info.passphrase,
+		strlcpy((char *)msg.key_info.body.passphrase_info.passphrase,
 			global_dut->dev_info.password,
 			sizeof(msg.key_info.body.passphrase_info.passphrase));
 
@@ -1843,7 +1843,7 @@ int sigma_nan_pairing_verification(struct sigma_dut *dut,
 		return -1;
 	}
 	if (strcasecmp(pairingverification_pasn, "Responder") == 0) {
-		nan_parse_mac_address(dut, mac, dut->peer_info.peer_mac_addr);
+		nan_parse_mac_address(dut, mac, (u8 *)dut->peer_info.peer_mac_addr);
 		dut->peer_info.role = SECURE_NAN_PAIRING_INITIATOR;
 		dut->dev_info.role = SECURE_NAN_PAIRING_RESPONDER;
 		dut->dev_info.trigger_verification = true;
