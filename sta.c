@@ -200,6 +200,9 @@ static int get_key_mgmt_capa(struct sigma_dut *dut);
 static int get_pairwise_ciphers_capa(struct sigma_dut *dut);
 static int get_group_ciphers_capa(struct sigma_dut *dut);
 static int get_group_mgmt_ciphers_capa(struct sigma_dut *dut);
+static int
+mac80211_sta_set_addba_buf_size(struct sigma_dut *dut, const char *intf,
+				int buf_size);
 
 #ifdef ANDROID
 
@@ -607,6 +610,77 @@ int wil6210_set_force_mcs(struct sigma_dut *dut, int force, int mcs)
 
 	return wil6210_wmi_send(dut, WIL_WMI_UNIT_TEST_CMDID,
 				&cmd, sizeof(cmd));
+}
+
+
+int system_cmd_dequeue(struct sigma_dut *dut)
+{
+	unsigned int i;
+
+	if (!dut)
+		return -1;
+	if (!dut->defer_fwtest_cmds)
+		return 0;
+
+	for (i = 0; i < dut->system_cmd_qlen; i++) {
+		run_system_wrapper(dut, "%s", dut->system_cmd_bufq[i]);
+		free(dut->system_cmd_bufq[i]);
+		dut->system_cmd_bufq[i] = NULL;
+	}
+	dut->system_cmd_qlen = 0;
+	return 0;
+}
+
+
+int system_cmd_enqueue(struct sigma_dut *dut, const char *cmd)
+{
+	unsigned int i;
+
+	if (!dut || !cmd)
+		return -1;
+	if (!dut->defer_fwtest_cmds)
+		return 0;
+
+	if (dut->system_cmd_qlen >= SYSTEM_CMD_QLEN_MAX) {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"system_cmd queue full");
+		return -1;
+	}
+
+	for (i = 0; i < dut->system_cmd_qlen; i++) {
+		if (strcmp(dut->system_cmd_bufq[i], cmd) == 0) {
+			sigma_dut_print(dut, DUT_MSG_DEBUG,
+					"system_cmd already in queue");
+			return 0;
+		}
+	}
+
+	dut->system_cmd_bufq[dut->system_cmd_qlen] = strdup(cmd);
+	if (!dut->system_cmd_bufq[dut->system_cmd_qlen]) {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"system_cmd enqueue failed");
+		return -1;
+	}
+	dut->system_cmd_qlen++;
+
+	return 0;
+}
+
+
+void system_cmd_flush(struct sigma_dut *dut)
+{
+	unsigned int i;
+
+	if (!dut)
+		return;
+	if (!dut->defer_fwtest_cmds)
+		return;
+
+	for (i = 0; i < dut->system_cmd_qlen; i++) {
+		free(dut->system_cmd_bufq[i]);
+		dut->system_cmd_bufq[i] = NULL;
+	}
+	dut->system_cmd_qlen = 0;
 }
 
 
@@ -2044,7 +2118,7 @@ static int set_wpa_common(struct sigma_dut *dut, struct sigma_conn *conn,
 	char *pos;
 	int id, rem, ret;
 	int cipher_set = 0;
-	int owe, sae;
+	int owe, eppke, sae;
 	int suite_b = 0;
 
 	id = add_network_common(dut, conn, ifname, cmd);
@@ -2053,11 +2127,14 @@ static int set_wpa_common(struct sigma_dut *dut, struct sigma_conn *conn,
 
 	val = get_param(cmd, "Type");
 	owe = val && strcasecmp(val, "OWE") == 0;
+	eppke = val && strcasecmp(val, "EPPKE") == 0;
 	sae = val && strcasecmp(val, "SAE") == 0;
 
 	val = get_param(cmd, "keyMgmtType");
 	if (!val && owe)
 		val = "OWE";
+	else if (!val && eppke)
+		val = "EPPKE";
 	if (val == NULL) {
 		/* keyMgmtType is being replaced with AKMSuiteType, so ignore
 		 * this missing parameter and assume proto=WPA2. */
@@ -2081,7 +2158,8 @@ static int set_wpa_common(struct sigma_dut *dut, struct sigma_conn *conn,
 		suite_b = 1;
 		if (set_network(ifname, id, "proto", "WPA2") < 0)
 			return -2;
-	} else if (strcasecmp(val, "OWE") == 0) {
+	} else if (strcasecmp(val, "OWE") == 0 ||
+		   strcasecmp(val, "EPPKE") == 0) {
 	} else if (strcasecmp(val, "WPA3") == 0) {
 		if (set_network(ifname, id, "proto", "RSN") < 0)
 			return -2;
@@ -2188,7 +2266,7 @@ static int set_wpa_common(struct sigma_dut *dut, struct sigma_conn *conn,
 			return ERROR_SEND_STATUS;
 	}
 
-	if (!cipher_set && !owe) {
+	if (!cipher_set && !owe && !eppke) {
 		send_resp(dut, conn, SIGMA_ERROR,
 			  "errorCode,Missing encpType and PairwiseCipher");
 		return 0;
@@ -2374,7 +2452,7 @@ static int set_wpa_common(struct sigma_dut *dut, struct sigma_conn *conn,
 			send_resp(dut, conn, SIGMA_INVALID, "errorCode,Unrecognized PMF value");
 			return 0;
 		}
-	} else if (owe || suite_b) {
+	} else if (owe || eppke || suite_b) {
 		dut->sta_pmf = STA_PMF_REQUIRED;
 		if (set_network(ifname, id, "ieee80211w", "2") < 0)
 			return -2;
@@ -2733,6 +2811,23 @@ static enum sigma_cmd_result cmd_sta_set_psk(struct sigma_dut *dut,
 					"Failed to clear sae_groups");
 			return -2;
 		}
+	}
+
+	if ((type && strcasecmp(type, "EPPKE-PSK-SAE") == 0) ||
+	    (dut->akm_values & (1 << AKM_EPPKE))) {
+		if (val) {
+			snprintf(buf, sizeof(buf), "SET pasn_groups %s", val);
+			if (wpa_command(ifname, buf) != 0) {
+				sigma_dut_print(dut, DUT_MSG_ERROR,
+						"Failed to set pasn_groups");
+				return -2;
+			}
+		} else if (wpa_command(ifname, "SET pasn_groups ") != 0) {
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"Failed to clear pasn_groups");
+			return -2;
+		}
+
 	}
 
 	val = get_param(cmd, "InvalidSAEElement");
@@ -3132,6 +3227,11 @@ static int set_eap_common(struct sigma_dut *dut, struct sigma_conn *conn,
 		erp = 1;
 	if (erp && set_network(ifname, id, "erp", "1") < 0)
 		return ERROR_SEND_STATUS;
+
+	val = get_param(cmd, "IEEE8021x_Auth");
+	if (val && set_network(ifname, id, "eap_over_auth_frame",
+			       get_enable_disable(val) ? "1" : "0") < 0)
+		return -2;
 
 	dut->sta_associate_wait_connect = 1;
 
@@ -3626,6 +3726,52 @@ static enum sigma_cmd_result sta_set_owe(struct sigma_dut *dut,
 }
 
 
+static enum sigma_cmd_result sta_set_eppke(struct sigma_dut *dut,
+					    struct sigma_conn *conn,
+					    struct sigma_cmd *cmd)
+{
+	const char *intf = get_param(cmd, "Interface");
+	const char *ifname, *val;
+	int id;
+
+	if (intf == NULL)
+		return INVALID_SEND_STATUS;
+
+	if (strcmp(intf, get_main_ifname(dut)) == 0)
+		ifname = get_station_ifname(dut);
+	else
+		ifname = intf;
+
+	id = set_wpa_common(dut, conn, ifname, cmd);
+	if (id < 0)
+		return id;
+
+	val = get_param(cmd, "AKMSuiteType");
+	if (!val && set_network(ifname, id, "key_mgmt", "EPPKE") < 0)
+		return ERROR_SEND_STATUS;
+
+	if (wpa_command(ifname, "SET pasn_groups ") != 0) {
+		sigma_dut_print(dut, DUT_MSG_ERROR,
+				"Failed to clear pasn_groups");
+		return ERROR_SEND_STATUS;
+	}
+
+	val = get_param(cmd, "ECGroupID");
+	if (val) {
+		char buf[64];
+
+		snprintf(buf, sizeof(buf), "SET pasn_groups %s", val);
+		if (wpa_command(ifname, buf) != 0) {
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"Failed to set pasn_groups");
+			return ERROR_SEND_STATUS;
+		}
+	}
+
+	return SUCCESS_SEND_STATUS;
+}
+
+
 static int get_key_mgmt_capa(struct sigma_dut *dut)
 {
 	char key_mgmt[500];
@@ -4031,6 +4177,8 @@ static enum sigma_cmd_result cmd_sta_set_security(struct sigma_dut *dut,
 		return sta_set_open(dut, conn, cmd);
 	if (strcasecmp(type, "OWE") == 0)
 		return sta_set_owe(dut, conn, cmd);
+	if (strcasecmp(type, "EPPKE") == 0)
+		return sta_set_eppke(dut, conn, cmd);
 	if (strcasecmp(type, "PSK") == 0 ||
 	    strcasecmp(type, "PSK-SAE") == 0 ||
 	    strcasecmp(type, "SAE") == 0 ||
@@ -4116,6 +4264,57 @@ int ath6kl_client_uapsd(struct sigma_dut *dut, const char *intf, int uapsd)
 		fclose(f);
 	}
 #endif /* __linux__ */
+
+	return 0;
+}
+
+
+static int ath12k_get_debugfs_file(const char *intf, const char *entry,
+				   char *fname, size_t fname_len)
+{
+	char path[128], phy_link[128], *pos;
+	ssize_t res;
+
+	res = snprintf(phy_link, sizeof(phy_link), "/sys/class/net/%s/phy80211",
+		       intf);
+	if (res < 0 || (size_t) res >= sizeof(phy_link))
+		return -1;
+
+	res = readlink(phy_link, path, sizeof(path));
+	if (res < 0 || res >= (int) sizeof(path))
+		return -1;
+
+	path[res] = '\0';
+	pos = strrchr(path, '/');
+	pos = pos ? pos + 1 : path;
+
+	res = snprintf(fname, fname_len,
+		       "/sys/kernel/debug/ieee80211/%s/ath12k/%s", pos, entry);
+	if (res < 0 || res >= (int) fname_len)
+		return -1;
+
+	return 0;
+}
+
+
+static int ath12k_write_debugfs_u8(struct sigma_dut *dut, const char *intf,
+				   const char *entry, u8 value)
+{
+	char fname[128];
+	FILE *f;
+
+	if (ath12k_get_debugfs_file(intf, entry, fname, sizeof(fname)))
+		return -1;
+
+	f = fopen(fname, "w");
+	if (!f)
+		return -1;
+
+	fprintf(f, "%u\n", (unsigned int) value);
+	fclose(f);
+
+	sigma_dut_print(dut, DUT_MSG_DEBUG, "Set %s=%u via %s",
+			entry, (unsigned int) value, fname);
 
 	return 0;
 }
@@ -4727,9 +4926,9 @@ static int sta_config_params(struct sigma_dut *dut, const char *intf,
 			     enum qca_sta_helper_config_params config_cmd,
 			     int value)
 {
+	int ret = -1;
 #ifdef NL80211_SUPPORT
 	struct nl_msg *msg;
-	int ret;
 	struct nlattr *params;
 	int ifindex;
 
@@ -4879,22 +5078,49 @@ static int sta_config_params(struct sigma_dut *dut, const char *intf,
 	nla_nest_end(msg, params);
 
 	ret = send_and_recv_msgs(dut, dut->nl_ctx, msg, NULL, NULL);
-	if (ret) {
-		sigma_dut_print(dut, DUT_MSG_ERROR,
-				"%s: err in send_and_recv_msgs, ret=%d",
-				__func__, ret);
-		return ret;
-	}
+	if (!ret)
+		return 0;
 
-	return 0;
+	sigma_dut_print(dut, DUT_MSG_ERROR,
+			"%s: err in send_and_recv_msgs, ret=%d",
+			__func__, ret);
+	goto nl_done;
 
 fail:
 	sigma_dut_print(dut, DUT_MSG_ERROR,
 			"%s: err in adding vendor_cmd and vendor_data",
 			__func__);
 	nlmsg_free(msg);
+nl_done:
 #endif /* NL80211_SUPPORT */
-	return -1;
+
+	if (get_driver_type(dut) == DRIVER_MAC80211) {
+		const char *entry = NULL;
+		u8 debugfs_val = 0;
+
+		switch (config_cmd) {
+		case STA_SET_EHT_MLO_MAX_SIMULTANEOUS_LINKS:
+			entry = "mlo_max_simultaneous_links";
+			debugfs_val = (u8) value;
+			break;
+		case STA_SET_EHT_EML_CAPABILITY:
+			entry = "eml_capa_present";
+			debugfs_val = !!value;
+			break;
+		case STA_SET_T2LM_NEG_SUPPORT:
+			entry = "ttlm_neg_support";
+			debugfs_val = (u8) value;
+			break;
+		default:
+			break;
+		}
+
+		if (entry)
+			ret = ath12k_write_debugfs_u8(dut, intf, entry,
+						      debugfs_val);
+	}
+
+	return ret;
 }
 
 
@@ -5866,6 +6092,30 @@ static enum sigma_cmd_result cmd_sta_associate(struct sigma_dut *dut,
 		}
 	}
 
+	if ((dut->program == PROGRAM_EHT || dut->device_mode == MODE_11BE) &&
+	    get_driver_type(dut) == DRIVER_MAC80211) {
+		/* Use wpa_supplicant control interface for mac80211 drivers. */
+		if (multi_link) {
+			sigma_dut_print(dut, DUT_MSG_DEBUG,
+					"multi link %s", multi_link);
+			if (strcasecmp(multi_link, "Enable") == 0)
+				strlcpy(buf, "SET mld_force_single_link 0",
+					sizeof(buf));
+			else
+				strlcpy(buf, "SET mld_force_single_link 1",
+					sizeof(buf));
+		} else {
+			sigma_dut_print(dut, DUT_MSG_DEBUG,
+					"multi link config is not present");
+			strlcpy(buf, "SET mld_force_single_link 1",
+				sizeof(buf));
+		}
+
+		if (wpa_command(ifname, buf) < 0)
+			sigma_dut_print(dut, DUT_MSG_INFO,
+					"Failed to set mld_force_single_link");
+	}
+
 	if (dut->rsne_override) {
 #ifdef NL80211_SUPPORT
 		if (get_driver_type(dut) == DRIVER_WCN) {
@@ -5963,7 +6213,8 @@ static enum sigma_cmd_result cmd_sta_associate(struct sigma_dut *dut,
 		if ((dut->program == PROGRAM_WPA3 &&
 		     dut->sta_associate_wait_connect) ||
 		    dut->program == PROGRAM_QM || ap_link_mac ||
-		    (dut->dhcp_client_running && dut->client_privacy)) {
+		    (dut->dhcp_client_running && dut->client_privacy) ||
+		    (dut->defer_fwtest_cmds && dut->system_cmd_qlen > 0)) {
 			ctrl = open_wpa_mon(get_station_ifname(dut));
 			if (!ctrl)
 				return ERROR_SEND_STATUS;
@@ -6074,6 +6325,7 @@ static enum sigma_cmd_result cmd_sta_associate(struct sigma_dut *dut,
 		}
 
 		if (strstr(buf, "CTRL-EVENT-CONNECTED")) {
+			system_cmd_dequeue(dut);
 			if (dut->dhcp_client_running && dut->client_privacy) {
 				/*
 				 * Interface MAC address will be changed by
@@ -8110,6 +8362,23 @@ cmd_sta_preset_testparameters(struct sigma_dut *dut, struct sigma_conn *conn,
 		if (wpa_command(intf, buf) != 0) {
 			send_resp(dut, conn, SIGMA_ERROR,
 				"ErrorCode,Failed to set random RSNXE data");
+			return STATUS_SENT_ERROR;
+		}
+	}
+
+	val = get_param(cmd, "PMKID_Initial");
+	if (val) {
+		int pmkid_cnt = atoi(val);
+		char buf[30];
+		int len;
+
+		len = snprintf(buf, sizeof(buf), "TEST_RANDOM_PMKID_COUNT %d",
+			       pmkid_cnt);
+
+		if (len < 0 || len >= sizeof(buf) ||
+		    wpa_command(intf, buf) != 0) {
+			send_resp(dut, conn, SIGMA_ERROR,
+				  "ErrorCode,Failed to update PMKID_Initial");
 			return STATUS_SENT_ERROR;
 		}
 	}
@@ -11456,6 +11725,25 @@ static void sta_reset_default_wcn(struct sigma_dut *dut, const char *intf,
 }
 
 
+static void sta_reset_default_mac80211(struct sigma_dut *dut, const char *intf)
+{
+	int ret = 0;
+
+	if ((dut->program == PROGRAM_HE || dut->program == PROGRAM_EHT ||
+	    dut->device_mode == MODE_11BE || dut->program == PROGRAM_QM) &&
+	    strncmp(dut->device_driver, "ath12k", 6) == 0) {
+		ret = mac80211_sta_set_addba_buf_size(dut, intf, 64);
+		if (ret)
+			sigma_dut_print(dut, DUT_MSG_ERROR,
+					"addba buf size set err %d", ret);
+	}
+
+	/* Clear the wpa_supplicant single-link override. */
+	wpa_command(intf, "SET mld_force_single_link 0");
+
+}
+
+
 static int sta_set_client_privacy(struct sigma_dut *dut,
 				  struct sigma_conn *conn, const char *intf,
 				  int enable)
@@ -11595,6 +11883,8 @@ static enum sigma_cmd_result cmd_sta_reset_default(struct sigma_dut *dut,
 					  buf, sizeof(buf)));
 #endif /* ANDROID */
 
+	system_cmd_flush(dut);
+
 	if (dut->station_ifname_2g &&
 	    strcmp(dut->station_ifname_2g, intf) == 0)
 		dut->use_5g = 0;
@@ -11610,6 +11900,7 @@ static enum sigma_cmd_result cmd_sta_reset_default(struct sigma_dut *dut,
 		dut->default_timeout = dut->user_config_timeout;
 
 	dut->device_mode = MODE_UNKNOWN;
+	dut->ar_autorate_misc_cfg = 0;
 
 	dut->device_type = STA_unknown;
 	type = get_param(cmd, "type");
@@ -11646,6 +11937,9 @@ static enum sigma_cmd_result cmd_sta_reset_default(struct sigma_dut *dut,
 		break;
 	case DRIVER_WCN:
 		sta_reset_default_wcn(dut, intf, type);
+		break;
+	case DRIVER_MAC80211:
+		sta_reset_default_mac80211(dut, intf);
 		break;
 	default:
 		break;
@@ -13023,9 +13317,40 @@ mac80211_sta_set_addba_buf_size(struct sigma_dut *dut, const char *intf,
 {
 	char buf[64];
 
-	snprintf(buf, sizeof(buf), "-t 1 -m 0 -v 0 0x7e %d",
-		 buf_size == 256 ? 3 : 2);
-	return fwtest_cmd_wrapper(dut, buf, intf);
+	if (dut->defer_fwtest_cmds) {
+		snprintf(buf, sizeof(buf),
+			 "ath11k-fwtest -i %s -t 1 -m 0 -v 0 0x7e %d",
+			 intf, buf_size == 256 ? 3 : 2);
+		return system_cmd_enqueue(dut, buf);
+	} else {
+		snprintf(buf, sizeof(buf), "-t 1 -m 0 -v 0 0x7e %d",
+			 buf_size == 256 ? 3 : 2);
+		return fwtest_cmd_wrapper(dut, buf, intf);
+	}
+}
+
+
+static void mac80211_sta_set_ldpc(struct sigma_dut *dut, const char *intf,
+				  int ldpc)
+{
+	char buf[128];
+
+	if (dut->defer_fwtest_cmds) {
+		snprintf(buf, sizeof(buf),
+			 "ath11k-fwtest -i %s -t 1 -m 0x0 -v 0 0x1B 0x10000407",
+			 intf);
+		system_cmd_enqueue(dut, buf);
+
+		snprintf(buf, sizeof(buf),
+			 "ath11k-fwtest -i %s -t 1 -m 0x0 -v 0 0x1D %d",
+			 intf, ldpc);
+		system_cmd_enqueue(dut, buf);
+	} else {
+		fwtest_cmd_wrapper(dut, "-t 1 -m 0x0 -v 0 0x1B 0x10000407",
+				   intf);
+		snprintf(buf, sizeof(buf), "-t 1 -m 0x0 -v 0 0x1D %d", ldpc);
+		fwtest_cmd_wrapper(dut, buf, intf);
+	}
 }
 
 
@@ -13120,7 +13445,6 @@ cmd_sta_set_wireless_vht(struct sigma_dut *dut, struct sigma_conn *conn,
 	val = get_param(cmd, "BCC");
 	if (val) {
 		int bcc;
-		char buf[64];
 
 		bcc = strcmp(val, "1") == 0 || strcasecmp(val, "Enable") == 0;
 		/* use LDPC setting itself to set bcc coding, bcc coding
@@ -13130,12 +13454,7 @@ cmd_sta_set_wireless_vht(struct sigma_dut *dut, struct sigma_conn *conn,
 			wcn_sta_set_ldpc(dut, intf, !bcc);
 			break;
 		case DRIVER_MAC80211:
-			fwtest_cmd_wrapper(dut,
-					   "-t 1 -m 0x0 -v 0 0x1B 0x10000407",
-					   intf);
-			snprintf(buf, sizeof(buf), "-t 1 -m 0x0 -v 0 0x1D %d",
-				 !bcc);
-			fwtest_cmd_wrapper(dut, buf, intf);
+			mac80211_sta_set_ldpc(dut, intf, !bcc);
 			break;
 		default:
 			sigma_dut_print(dut, DUT_MSG_ERROR,
@@ -19591,6 +19910,55 @@ static int mac80211_he_gi_mapping(struct sigma_dut *dut,
 }
 
 
+#define MAC80211_AUTORATE_MISC_CFG_LTF_1X 0x00001
+#define MAC80211_AUTORATE_MISC_CFG_LTF_2X 0x00002
+#define MAC80211_AUTORATE_MISC_CFG_LTF_4X 0x00004
+#define MAC80211_AUTORATE_MISC_CFG_LTF_MASK \
+	(MAC80211_AUTORATE_MISC_CFG_LTF_1X | \
+	 MAC80211_AUTORATE_MISC_CFG_LTF_2X | \
+	 MAC80211_AUTORATE_MISC_CFG_LTF_4X)
+#define MAC80211_AUTORATE_MISC_CFG_GI_400NS 0x00100
+#define MAC80211_AUTORATE_MISC_CFG_GI_800NS 0x00200
+#define MAC80211_AUTORATE_MISC_CFG_GI_1600NS 0x00400
+#define MAC80211_AUTORATE_MISC_CFG_GI_3200NS 0x00800
+#define MAC80211_AUTORATE_MISC_CFG_GI_MASK \
+	(MAC80211_AUTORATE_MISC_CFG_GI_400NS | \
+	 MAC80211_AUTORATE_MISC_CFG_GI_800NS | \
+	 MAC80211_AUTORATE_MISC_CFG_GI_1600NS | \
+	 MAC80211_AUTORATE_MISC_CFG_GI_3200NS)
+#define MAC80211_AUTORATE_MISC_CFG_GI_LTF_MASK \
+	(MAC80211_AUTORATE_MISC_CFG_LTF_MASK | \
+	 MAC80211_AUTORATE_MISC_CFG_GI_MASK)
+#define MAC80211_AUTORATE_MISC_CFG_CODING_MASK 0x10000
+#define MAC80211_AUTORATE_MISC_CFG_LDPC_ENABLE 0x00000
+#define MAC80211_AUTORATE_MISC_CFG_LDPC_DISABLE 0x10000
+#define MAC80211_AUTORATE_MISC_CFG_DEFAULT \
+	(MAC80211_AUTORATE_MISC_CFG_LTF_MASK | \
+	 MAC80211_AUTORATE_MISC_CFG_GI_MASK)
+
+static int
+mac80211_set_autorate_misc_cfg(struct sigma_dut *dut, const char *intf,
+				      unsigned int value, unsigned int mask)
+{
+	char buf[100];
+	unsigned int new_cfg;
+	int ret;
+
+	new_cfg = dut->ar_autorate_misc_cfg;
+	new_cfg &= ~mask;
+	new_cfg |= value & mask;
+
+	snprintf(buf, sizeof(buf), "-t 1 -m 0 -v 0 0x80 0x%x",
+		 new_cfg);
+	ret = fwtest_cmd_wrapper(dut, buf, intf);
+	if (ret < 0)
+		return ret;
+
+	dut->ar_autorate_misc_cfg = new_cfg;
+	return ret;
+}
+
+
 static enum sigma_cmd_result mac80211_he_ltf(struct sigma_dut *dut,
 					     struct sigma_conn *conn,
 					     const char *intf,
@@ -19636,8 +20004,9 @@ static enum sigma_cmd_result mac80211_he_gi(struct sigma_dut *dut,
 		if (he_ltf != 0xFF)
 			value |= 1 << he_ltf;
 
-		snprintf(buf, sizeof(buf), "-t 1 -m 0 -v 0 0x80 %d", value);
-		ret = fwtest_cmd_wrapper(dut, buf, intf);
+		ret = mac80211_set_autorate_misc_cfg(
+			dut, intf, value,
+			MAC80211_AUTORATE_MISC_CFG_GI_LTF_MASK);
 		if (ret < 0)
 			return ERROR_SEND_STATUS;
 
@@ -19649,11 +20018,41 @@ static enum sigma_cmd_result mac80211_he_gi(struct sigma_dut *dut,
 				return ERROR_SEND_STATUS;
 		}
 	} else if (he_gi != 0xFF) {
-		snprintf(buf, sizeof(buf), "-t 1 -m 0 -v 0 0x80 %d",
-			 1 << he_gi);
-		ret = fwtest_cmd_wrapper(dut, buf, intf);
+		ret = mac80211_set_autorate_misc_cfg(
+			dut, intf, 1 << he_gi,
+			MAC80211_AUTORATE_MISC_CFG_GI_MASK);
 	}
 
+	if (ret < 0)
+		return ERROR_SEND_STATUS;
+
+	return SUCCESS_SEND_STATUS;
+}
+
+
+static enum sigma_cmd_result mac80211_coding_type(struct sigma_dut *dut,
+						  struct sigma_conn *conn,
+						  const char *intf,
+						  const char *val)
+{
+	unsigned int coding;
+	int ret;
+
+	if (strcasecmp(val, "BCCCoding") == 0) {
+		coding = MAC80211_AUTORATE_MISC_CFG_LDPC_DISABLE;
+	} else if (strcasecmp(val, "LDPCCoding") == 0) {
+		coding = MAC80211_AUTORATE_MISC_CFG_LDPC_ENABLE;
+	} else {
+		send_resp(dut, conn, SIGMA_ERROR,
+			  "ErrorCode,Unsupported CodingType value");
+		return STATUS_SENT_ERROR;
+	}
+
+	if (!dut->ar_autorate_misc_cfg)
+		dut->ar_autorate_misc_cfg = MAC80211_AUTORATE_MISC_CFG_DEFAULT;
+
+	ret = mac80211_set_autorate_misc_cfg(
+		dut, intf, coding, MAC80211_AUTORATE_MISC_CFG_CODING_MASK);
 	if (ret < 0)
 		return ERROR_SEND_STATUS;
 
@@ -19678,6 +20077,13 @@ mac80211_sta_set_rfeature_he(const char *intf, struct sigma_dut *dut,
 	val = get_param(cmd, "GI");
 	if (val || dut->ar_ltf) {
 		res = mac80211_he_gi(dut, intf, val);
+		if (res != SUCCESS_SEND_STATUS)
+			return res;
+	}
+
+	val = get_param(cmd, "CodingType");
+	if (val) {
+		res = mac80211_coding_type(dut, conn, intf, val);
 		if (res != SUCCESS_SEND_STATUS)
 			return res;
 	}

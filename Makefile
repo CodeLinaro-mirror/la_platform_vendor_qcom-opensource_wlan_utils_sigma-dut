@@ -56,6 +56,12 @@ OBJS += ftm.o
 OBJS += dpp.o
 OBJS += p2p_usd.o
 
+ifdef ENABLE_NAN
+CFLAGS += -DANDROID_WIFI_HAL -DANDROID_NAN
+OBJS += nan.o
+LIBS += -lwifihalqcom
+endif
+
 ifndef NO_TRAFFIC_AGENT
 CFLAGS += -DCONFIG_TRAFFIC_AGENT -DCONFIG_WFA_WMM_AC
 OBJS += traffic_agent.o

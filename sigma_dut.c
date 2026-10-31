@@ -44,7 +44,7 @@ int sigma_wmm_ac = 0;
  */
 int sigma_periodic_data = 0;
 
-#ifdef ANDROID
+#if defined(ANDROID) || defined(LINUX_EMBEDDED)
 #include <android/log.h>
 
 #ifdef ANDROID_WIFI_HAL
@@ -893,6 +893,8 @@ static void set_defaults(struct sigma_dut *dut)
 #ifdef ANDROID
 	dut->dscp_use_iptables = 1;
 #endif /* ANDROID */
+	dut->defer_fwtest_cmds = false;
+	dut->system_cmd_qlen = 0;
 	dut->autoconnect_default = 1;
 	set_host_name(dut);
 	dut->pasn_type = 0xf;
@@ -953,6 +955,7 @@ static void deinit_sigma_dut(struct sigma_dut *dut)
 #endif /* ANDROID_MDNS */
 	free(dut->sta_bssid_pool);
 	dut->sta_bssid_pool = NULL;
+	system_cmd_flush(dut);
 }
 
 
@@ -1371,6 +1374,10 @@ int main(int argc, char *argv[])
 	if (sigma_dut.device_driver[0])
 		sigma_dut_print(&sigma_dut, DUT_MSG_DEBUG, "device driver: %s",
 				sigma_dut.device_driver);
+
+	/* Deferred fwtest commands are supported only on ath12k */
+	if (strncmp(sigma_dut.device_driver, "ath12k", 6) == 0)
+		sigma_dut.defer_fwtest_cmds = true;
 
 #ifdef NL80211_SUPPORT
 	sigma_dut.nl_ctx = nl80211_init(&sigma_dut);
