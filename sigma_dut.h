@@ -115,6 +115,8 @@ struct sigma_dut;
 /* Set default operating channel width 80 MHz */
 #define VHT_DEFAULT_OPER_CHWIDTH AP_80_VHT_OPER_CHWIDTH
 
+#define SYSTEM_CMD_QLEN_MAX 64
+
 typedef unsigned int u32;
 typedef uint16_t u16;
 typedef unsigned char u8;
@@ -618,6 +620,12 @@ enum ap_band {
 	AP_BAND_MAX,
 };
 
+enum sigma_cmd_avail {
+	SIGMA_CMD_UNKNOWN,
+	SIGMA_CMD_NO,
+	SIGMA_CMD_YES,
+};
+
 struct sigma_dut {
 	const char *main_ifname;
 	char *main_ifname_2g;
@@ -998,6 +1006,7 @@ struct sigma_dut {
 	int ft_bss_mac_cnt;
 
 	char *ar_ltf;
+	unsigned int ar_autorate_misc_cfg;
 
 	int ap_numsounddim;
 	unsigned int he_mcsnssmap;
@@ -1318,6 +1327,7 @@ struct sigma_dut {
 	unsigned int prev_disable_scs_support;
 	unsigned int prev_disable_mscs_support;
 	int dscp_use_iptables;
+	bool defer_fwtest_cmds;
 	int autoconnect_default;
 	int dhcp_client_running;
 	int i2rlmr_iftmr;
@@ -1351,6 +1361,10 @@ struct sigma_dut {
 	char *sta_bssid_pool;
 	struct p2p_r2_connect_info p2p_connect_info;
 	pthread_t p2p_event_mon_thread;
+	enum sigma_cmd_avail ifconfig_avail;
+	enum sigma_cmd_avail ip_avail;
+	char *system_cmd_bufq[SYSTEM_CMD_QLEN_MAX];
+	unsigned int system_cmd_qlen;
 };
 
 
@@ -1483,8 +1497,6 @@ int sta_set_60g_abft_len(struct sigma_dut *dut, struct sigma_conn *conn,
 int wil6210_send_frame_60g(struct sigma_dut *dut, struct sigma_conn *conn,
 			   struct sigma_cmd *cmd);
 int hwaddr_aton(const char *txt, unsigned char *addr);
-int set_ipv4_addr(struct sigma_dut *dut, const char *ifname,
-		  const char *ip, const char *mask);
 int set_ipv4_gw(struct sigma_dut *dut, const char *gw);
 int send_addba_60g(struct sigma_dut *dut, struct sigma_conn *conn,
 		   struct sigma_cmd *cmd, const char *param);
@@ -1508,6 +1520,10 @@ int sta_twt_request(struct sigma_dut *dut, struct sigma_conn *conn,
 		    struct sigma_cmd *cmd);
 int start_dhcp_client(struct sigma_dut *dut, const char *ifname);
 void kill_dhcp_client(struct sigma_dut *dut, const char *ifname);
+
+int system_cmd_enqueue(struct sigma_dut *dut, const char *cmd);
+int system_cmd_dequeue(struct sigma_dut *dut);
+void system_cmd_flush(struct sigma_dut *dut);
 
 /* p2p.c */
 void p2p_register_cmds(void);
@@ -1549,6 +1565,14 @@ void convert_mac_addr_to_ipv6_lladdr(u8 *mac_addr, char *ipv6_buf,
 				     size_t buf_len);
 size_t convert_mac_addr_to_ipv6_linklocal(const u8 *mac_addr, u8 *ipv6);
 int snprintf_error(size_t size, int res);
+
+int run_if_up(struct sigma_dut *dut, const char *ifname);
+int run_if_down(struct sigma_dut *dut, const char *ifname);
+int run_if_mtu(struct sigma_dut *dut, const char *ifname, int mtu);
+int run_ipv4_addr(struct sigma_dut *dut, const char *ifname,
+		  const char *ipaddr, const char *netmask);
+int run_append_hwaddr(struct sigma_dut *dut, const char *ifname,
+		      const char *outfile);
 
 #ifndef ANDROID
 size_t strlcpy(char *dest, const char *src, size_t siz);
