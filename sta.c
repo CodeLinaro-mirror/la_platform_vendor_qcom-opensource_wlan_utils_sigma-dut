@@ -12030,6 +12030,7 @@ static enum sigma_cmd_result cmd_sta_reset_default(struct sigma_dut *dut,
 
 	wpa_command(intf, "WPS_ER_STOP");
 	wpa_command(intf, "FLUSH");
+	wpa_command(intf, "SET sae_groups ");
 	wpa_command(intf, "ERP_FLUSH");
 	wpa_command(intf, "SET radio_disabled 0");
 
